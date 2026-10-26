@@ -33,6 +33,10 @@ enabled = true
 id = "mcbot"
 title = "mcbot 同伴"
 entry = "surfaces/mcbot.tsx"
+# 宿主默认 mode = "static"，会把 entry 当 http 静态资源塞进 iframe 的 src，
+# 浏览器请求到的是一段 TSX 文本，页面全白。只有 "hosted-tsx" 才走
+# @neko/plugin-ui 的编译器与沙箱。
+mode = "hosted-tsx"
 # context 对应 @ui.context(id="mcbot")；缺了 api.call 会因 UI context not found 失败。
 context = "mcbot"
 # action:call 让面板通过 props.api.call 调用 mcbot_status / mcbot_stop。
