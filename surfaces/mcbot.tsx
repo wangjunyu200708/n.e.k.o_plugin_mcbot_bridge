@@ -7,7 +7,6 @@ import {
   Page,
   Stack,
   StatusBadge,
-  Text,
   useEffect,
   useRef,
   useState,
@@ -33,6 +32,12 @@ const COPY: Record<LocaleKey, {
   questionsNone: string
   stopHint: string
   errorPrefix: string
+  execution: string
+  progress: string
+  result: string
+  delivery: string
+  age: string
+  unknown: string
 }> = {
   "zh-CN": {
     title: "mcbot 同伴",
@@ -49,6 +54,12 @@ const COPY: Record<LocaleKey, {
     questionsNone: "无",
     stopHint: "停止会让同伴放下当前全部任务；她没接受时面板会提示。",
     errorPrefix: "出错：",
+    execution: "执行状态",
+    progress: "最近观察",
+    result: "最近结果",
+    delivery: "待送通知",
+    age: "状态观察距今",
+    unknown: "未知",
   },
   en: {
     title: "mcbot companion",
@@ -65,6 +76,12 @@ const COPY: Record<LocaleKey, {
     questionsNone: "none",
     stopHint: "Stopping makes the companion drop everything she is doing; if she refuses, the panel says so.",
     errorPrefix: "Error: ",
+    execution: "Execution",
+    progress: "Last observation",
+    result: "Last result",
+    delivery: "Pending notices",
+    age: "Status observed",
+    unknown: "Unknown",
   },
 }
 
@@ -73,7 +90,10 @@ function resolveLocale(locale: string | undefined): LocaleKey {
 }
 
 function unwrapActionResult(envelope: any): Record<string, any> {
-  const inner = envelope?.result ?? envelope?.data ?? envelope
+  let inner = envelope?.result ?? envelope?.data ?? envelope
+  if (inner?.success === true && inner?.meta?.agent && inner.data && typeof inner.data === "object") {
+    inner = inner.data
+  }
   return inner && typeof inner === "object" ? inner : {}
 }
 
@@ -86,6 +106,11 @@ type PanelState = {
   questions: number
   notice: string
   error: string
+  taskState: string
+  progress: string
+  result: string
+  notices: number
+  age: number | null
 }
 
 export default function McbotCompanionPanel(props: PluginSurfaceProps) {
@@ -100,6 +125,11 @@ export default function McbotCompanionPanel(props: PluginSurfaceProps) {
     questions: 0,
     notice: "",
     error: "",
+    taskState: "unknown",
+    progress: "",
+    result: "",
+    notices: 0,
+    age: null,
   })
 
   const refreshingRef = useRef(false)
@@ -122,6 +152,11 @@ export default function McbotCompanionPanel(props: PluginSurfaceProps) {
         companion: String(data.companion || ""),
         task: String(data.pending_task || ""),
         questions: Number(data.pending_questions || 0),
+        taskState: String(data.task_state || "unknown"),
+        progress: String(data.latest_progress?.text || ""),
+        result: String(data.recent_results?.at(-1)?.text || ""),
+        notices: Number(data.notifications_pending || 0),
+        age: typeof data.status_age_seconds === "number" ? data.status_age_seconds : null,
       }))
     } catch (exc: any) {
       if (unmountedRef.current) return
@@ -180,7 +215,18 @@ export default function McbotCompanionPanel(props: PluginSurfaceProps) {
 
   const items = [
     { key: "companion", label: copy.companion, value: state.companion || copy.companionUnknown },
-    { key: "task", label: copy.task, value: state.task || copy.taskIdle },
+    { key: "task", label: copy.task, value: state.task || (state.taskState === "idle" ? copy.taskIdle : copy.unknown) },
+    {
+      key: "execution", label: copy.execution,
+      value: (resolveLocale(props.locale) === "zh-CN"
+        ? { running: "执行中", submitting: "正在提交", claimed: "准备提交", unknown: "结果未确认", idle: "空闲" }
+        : { running: "Running", submitting: "Submitting", claimed: "Preparing", unknown: "Unconfirmed", idle: "Idle" }
+      )[state.taskState as "running" | "submitting" | "claimed" | "unknown" | "idle"] || copy.unknown,
+    },
+    { key: "progress", label: copy.progress, value: state.progress || copy.unknown },
+    { key: "result", label: copy.result, value: state.result || copy.unknown },
+    { key: "delivery", label: copy.delivery, value: String(state.notices) },
+    { key: "age", label: copy.age, value: state.age === null ? copy.unknown : `${state.age}s` },
     {
       key: "questions",
       label: copy.questions,
@@ -204,7 +250,6 @@ export default function McbotCompanionPanel(props: PluginSurfaceProps) {
               {state.stopping ? copy.stopping : copy.stop}
             </Button>
           </ButtonGroup>
-          <Text>{copy.stopHint}</Text>
         </Stack>
       </Card>
     </Page>

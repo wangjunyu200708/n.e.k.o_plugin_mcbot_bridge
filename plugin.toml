@@ -4,7 +4,7 @@ name = "MCBot 同伴桥接"
 description = "桥接本地 mcbot（Fabric 假人同伴），让猫娘可以指挥同伴做事、替同伴向你转达问题，并实时转播同伴的进展。"
 short_description = "Bridge a local mcbot companion (REST + SSE) so neko-chan can direct it and relay its progress."
 keywords = ["minecraft", "mcbot", "companion"]
-version = "0.1.0"
+version = "0.3.2"
 entry = "plugin.plugins.mcbot_bridge:McbotBridgePlugin"
 
 [plugin.author]
@@ -68,19 +68,11 @@ reconnect_interval_seconds = 5.0
 # 单次 REST 调用（task/cancel/answer/status）的超时。
 http_timeout_seconds = 10.0
 
-# /v1/ask 的超时。必须大于 mcbot 自己的 135s 上限，好让我们看到 mcbot
-# 报的超时，而不是自造一个和它赛跑的客户端超时。
+# 兼容传输层的 /v1/ask 超时。猫娘的 mcbot_ask 现在只读状态，不创建游戏任务。
 ask_timeout_seconds = 150.0
 
-# 派活之后等 done 事件的预算。超时就放开任务槽并如实说"没等到回音"——
-# 没有这条，一个丢了完成事件的任务（同伴中途崩了/桥重启）会把槽位永久占住，
-# 之后每次派活都只会回"她正忙着"。
-#
-# 15 分钟是实测调出来的：第一次真机验证设的是 300s，结果一个「看看附近有什么」
-# 的复合任务在 move_to（单步上限 180s）+ break_block（60s）之后仍未结束，
-# 看门狗在 300 秒整开火、提前放开了槽位，而真正的 done 是之后才到的。
-# 任务本身合法，是预算给短了。宁可放长：多等只是慢，提前放槽会让后续派活
-# 叠在一个仍在跑的同伴身上。
+# 首次提示结果仍未知的等待时间。超时保留任务及叫停能力，不释放任务槽、
+# 不取消游戏任务、不自动重发。迟到终态仍归原任务；明确叫停后才可重新派活。
 task_wait_timeout_seconds = 900.0
 
 # 是否订阅 /v1/events。关掉后同伴的进展、反问和完成都不会主动到达（只剩

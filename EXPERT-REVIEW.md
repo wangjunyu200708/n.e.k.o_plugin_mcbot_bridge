@@ -1,5 +1,9 @@
 # mcbot_bridge — Expert Review Brief
 
+> Historical review brief from 2026-10-13. It does not describe the 0.2.0
+> candidate. Current task, notification and observation contracts are in
+> README.md and docs/BRIDGE-RELIABILITY-2026-10-25.md.
+
 **Artifact under review:** `n.e.k.o_plugin_mcbot_bridge` (branch `main`, review baseline `7c23cf5`;
 working tree additionally carries an uncommitted fix batch — see §5).
 **Written:** 2026-10-13. **Purpose:** external design review of a first-party N.E.K.O. plugin.

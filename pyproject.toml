@@ -1,21 +1,22 @@
 [project]
 name = "n.e.k.o_plugin_mcbot_bridge"
-version = "0.1.0"
+version = "0.3.2"
 description = "N.E.K.O mcbot 同伴桥接插件（指挥同伴做事、转达反问、实时转播进展）"
 requires-python = ">=3.11"
+dependencies = ["httpx>=0.27,<1"]
 
 [project.optional-dependencies]
 dev = ["pytest>=9", "pytest-asyncio>=1.3"]
 
-# Package only runtime files. The expert review, test harness and test suite
-# stay in the repository for development but are not shipped to users.
 [tool.neko.build]
-exclude_dirs = ["tests"]
-exclude_files = [
-    "EXPERT-REVIEW.md",
-    "conftest.py",
-    "PLAN-connector-fixes-*.md",
+include = [
+    "__init__.py", "client.py", "service.py", "prompts.py",
+    "plugin.toml", "config.schema.json", "pyproject.toml",
+    "README.md", "LICENSE", "i18n/*.json", "surfaces/*.tsx",
+    "docs/guide.md", "docs/CONNECT-AND-TEST.md", "docs/REPORTING-2026-10-25.md", "vendor/**",
 ]
+exclude_dirs = ["data", "tests", "tools"]
+exclude_files = [".lock"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

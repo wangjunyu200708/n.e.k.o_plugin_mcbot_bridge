@@ -136,6 +136,8 @@ class McbotClient:
         # v1.0 mints a fresh one per bridge run and restarts SSE ids at 1, so a
         # cursor from a previous session must never be replayed into a new one.
         self._session_id: str = ""
+        self.checkpoint: Optional[Callable[[], Awaitable[None]]] = None
+        self.on_gap: Optional[Callable[[], Awaitable[None]]] = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -149,6 +151,7 @@ class McbotClient:
             base_url=self.base_url,
             headers=self._auth_headers(),
             timeout=httpx.Timeout(self.http_timeout),
+            trust_env=False,
         )
 
     async def close(self) -> None:
@@ -308,6 +311,9 @@ class McbotClient:
                         if isinstance(sid, str) and sid:
                             self._session_id = sid
                     try:
+                        if (self._last_event_id.isdecimal() and frame.id.isdecimal()
+                                and int(frame.id) > int(self._last_event_id) + 1 and self.on_gap):
+                            await self.on_gap()
                         await on_event(frame)
                     except Exception as exc:
                         # A misbehaving consumer must not tear down the stream:
@@ -325,6 +331,8 @@ class McbotClient:
                     # receipt, so a mid-handling failure loses nothing.
                     if frame.id and not cursor_blocked:
                         self._last_event_id = frame.id
+                        if self.checkpoint:
+                            await self.checkpoint()
         except httpx.HTTPStatusError as exc:
             self._last_error = f"HTTP {exc.response.status_code}"
             self._log_warning(

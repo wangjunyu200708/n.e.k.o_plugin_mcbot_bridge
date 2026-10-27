@@ -241,7 +241,7 @@
         "ask_timeout_seconds": {
           "type": "number",
           "title": "Question timeout",
-          "description": "Timeout in seconds for asking the companion a question and waiting for her answer. Must exceed mcbot's own 135 second ceiling.",
+          "description": "Legacy transport timeout for /v1/ask. The character's mcbot_ask now reads observations without creating game work.",
           "x-title-i18n": {
             "zh-CN": "提问超时",
             "zh-TW": "提問逾時",
@@ -253,14 +253,14 @@
             "pt": "Tempo limite de pergunta"
           },
           "x-description-i18n": {
-            "zh-CN": "直接向同伴提问、等待她回答的超时（秒）。必须大于 mcbot 自身的 135 秒上限。",
-            "zh-TW": "直接向同伴提問、等待她回答的逾時（秒）。必須大於 mcbot 本身的 135 秒上限。",
-            "en": "Timeout in seconds for asking the companion a question and waiting for her answer. Must exceed mcbot's own 135 second ceiling.",
-            "ja": "相棒に直接質問して答えを待つタイムアウト秒数。mcbot 自身の 135 秒の上限より大きくする必要があります。",
-            "ko": "동료에게 직접 질문하고 답을 기다리는 시간 초과(초)입니다. mcbot 자체의 135초 상한보다 커야 합니다.",
-            "ru": "Тайм-аут в секундах для прямого вопроса спутнице и ожидания ответа. Должен превышать собственный предел mcbot в 135 секунд.",
-            "es": "Tiempo límite en segundos para preguntar al compañero y esperar su respuesta. Debe superar el tope de 135 segundos del propio mcbot.",
-            "pt": "Tempo limite em segundos para perguntar ao companheiro e esperar a resposta. Deve exceder o teto de 135 segundos do próprio mcbot."
+            "zh-CN": "兼容传输层的 /v1/ask 超时。猫娘的 mcbot_ask 现在只读取观察，不创建游戏任务。",
+            "zh-TW": "相容傳輸層的 /v1/ask 逾時。角色的 mcbot_ask 現在只讀取觀察，不建立遊戲任務。",
+            "en": "Legacy transport timeout for /v1/ask. The character's mcbot_ask now reads observations without creating game work.",
+            "ja": "互換用 /v1/ask のタイムアウト。mcbot_ask は観察のみで、ゲームのタスクを作成しません。",
+            "ko": "호환용 /v1/ask 시간 제한입니다. mcbot_ask는 관찰만 읽으며 게임 작업을 만들지 않습니다.",
+            "ru": "Тайм-аут совместимого /v1/ask. mcbot_ask только читает наблюдения и не создаёт игровые задачи.",
+            "es": "Tiempo límite de /v1/ask por compatibilidad. mcbot_ask solo lee observaciones sin crear tareas.",
+            "pt": "Tempo limite de /v1/ask por compatibilidade. mcbot_ask só lê observações sem criar tarefas."
           },
           "minimum": 5.0,
           "default": 150.0
@@ -268,7 +268,7 @@
         "task_wait_timeout_seconds": {
           "type": "number",
           "title": "Completion wait budget",
-          "description": "How many seconds to hold the task slot waiting for a completion event. On timeout the slot is released and the user is told no reply came, so a task whose completion event was lost cannot wedge the slot forever.",
+          "description": "Seconds before reporting an unknown result. The task remains tracked and stoppable until a valid terminal result or explicit cancellation; it is never automatically resent.",
           "x-title-i18n": {
             "zh-CN": "完成等待预算",
             "zh-TW": "完成等待預算",
@@ -280,14 +280,14 @@
             "pt": "Orçamento de espera de conclusão"
           },
           "x-description-i18n": {
-            "zh-CN": "派活之后等完成事件的上限（秒）。超时就会放开任务槽并告诉用户没等到回音，避免一个丢了完成事件的任务把槽位永久占住。",
-            "zh-TW": "派活之後等完成事件的上限（秒）。逾時就會放開任務槽並告訴使用者沒等到回音，避免一個丟了完成事件的任務把槽位永久佔住。",
-            "en": "How many seconds to hold the task slot waiting for a completion event. On timeout the slot is released and the user is told no reply came, so a task whose completion event was lost cannot wedge the slot forever.",
-            "ja": "タスク投入後、完了イベントを待つ上限秒数。超過すると枠を解放して「返事が来なかった」と伝えます。完了イベントを失ったタスクが枠を占め続けるのを防ぎます。",
-            "ko": "작업을 투입한 뒤 완료 이벤트를 기다리는 상한(초)입니다. 초과하면 슬롯을 풀고 '응답이 없었다'고 알려, 완료 이벤트를 잃은 작업이 슬롯을 영구히 차지하지 않게 합니다.",
-            "ru": "Сколько секунд удерживать слот задачи в ожидании события завершения. По тайм-ауту слот освобождается, а пользователю сообщается, что ответа не было, — потерянное событие не заблокирует слот навсегда.",
-            "es": "Cuántos segundos mantener el turno de tarea esperando un evento de finalización. Al agotarse se libera y se avisa que no hubo respuesta, para que una tarea cuyo evento se perdió no bloquee el turno para siempre.",
-            "pt": "Quantos segundos manter o slot de tarefa aguardando um evento de conclusão. Ao esgotar, o slot é liberado e o usuário é avisado de que não houve resposta, para que uma tarefa cujo evento se perdeu não trave o slot para sempre."
+            "zh-CN": "等待多少秒后首次提示结果未知。超时保留跟踪和叫停能力；收到有效终态或明确取消前不释放，不自动重发。",
+            "zh-TW": "等待多少秒後首次提示結果未知。逾時保留追蹤及停止能力；有效終態或明確取消前不釋放，不自動重發。",
+            "en": "Seconds before reporting an unknown result. Tracking and cancellation remain available until a valid terminal result or explicit cancellation; never automatically resend.",
+            "ja": "結果不明を通知するまでの秒数。追跡と停止を維持し、有効な終了結果か明示的な取消まで枠を保持します。自動再送しません。",
+            "ko": "결과 불명을 알리기까지의 초입니다. 유효한 종료 결과나 명시적 취소까지 추적과 정지 기능을 유지하며 자동 재전송하지 않습니다.",
+            "ru": "Секунды до сообщения о неизвестном результате. Отслеживание и отмена сохраняются до достоверного завершения или явной отмены. Без автоповтора.",
+            "es": "Segundos hasta avisar del resultado desconocido. Se conservan seguimiento y cancelación hasta el fin válido o la cancelación explícita; sin reenvío automático.",
+            "pt": "Segundos até avisar do resultado desconhecido. Mantém acompanhamento e cancelamento até o fim válido ou cancelamento explícito; sem reenvio automático."
           },
           "minimum": 5.0,
           "default": 900.0
@@ -295,7 +295,7 @@
         "stream_events": {
           "type": "boolean",
           "title": "Subscribe to companion events",
-          "description": "Receive the companion's progress, questions and completions as they happen. Turning this off leaves only dispatching and queries — she will never speak up on her own — so it is rarely worth disabling.",
+          "description": "Receive progress, questions and results. Required for new task dispatch; observations and explicit stopping remain available when disabled.",
           "x-title-i18n": {
             "zh-CN": "订阅同伴事件",
             "zh-TW": "訂閱同伴事件",
@@ -307,14 +307,14 @@
             "pt": "Assinar eventos do companheiro"
           },
           "x-description-i18n": {
-            "zh-CN": "实时接收同伴的进展、反问和完成。关掉后只剩派活与查询，同伴不会主动开口，一般不该关。",
-            "zh-TW": "即時接收同伴的進展、反問和完成。關掉後只剩派活與查詢，同伴不會主動開口，一般不該關。",
-            "en": "Receive the companion's progress, questions and completions as they happen. Turning this off leaves only dispatching and queries — she will never speak up on her own — so it is rarely worth disabling.",
-            "ja": "相棒の進捗・質問・完了をリアルタイムで受け取ります。切るとタスク投入と照会だけになり、相棒から話しかけてこなくなるため、通常は切るべきではありません。",
-            "ko": "동료의 진행, 질문, 완료를 실시간으로 받습니다. 끄면 작업 투입과 조회만 남고 동료가 먼저 말을 걸지 않으므로 보통 끌 일이 없습니다.",
-            "ru": "Получать прогресс, вопросы и завершения спутницы по мере их появления. При отключении останутся только задачи и запросы — она больше не заговорит первой, — поэтому выключать это почти никогда не стоит.",
-            "es": "Recibir el progreso, las preguntas y los finales del compañero a medida que ocurren. Al desactivarlo solo quedan el envío de tareas y las consultas, y ella nunca hablará por su cuenta, así que rara vez conviene desactivarlo.",
-            "pt": "Receber o progresso, as perguntas e as conclusões do companheiro conforme acontecem. Desligar deixa apenas o envio de tarefas e as consultas — ela nunca falará por conta própria —, então raramente vale desligar."
+            "zh-CN": "接收进展、问题和结果。派发新任务需要开启；关闭后仍可读取状态和明确叫停。",
+            "zh-TW": "接收進度、問題和結果。派發新任務需要開啟；關閉後仍可讀取狀態和明確停止。",
+            "en": "Receive progress, questions and results. Required for new task dispatch; observations and explicit stopping remain available when disabled.",
+            "ja": "進捗・質問・結果を受信します。新規タスクには必須です。無効時も状態照会と明示的な停止は可能です。",
+            "ko": "진행, 질문, 결과를 받습니다. 새 작업 전송에 필요합니다. 꺼도 상태 조회와 명시적 정지는 가능합니다.",
+            "ru": "Получать прогресс, вопросы и результаты. Нужно для новых задач; чтение состояния и явная остановка доступны и без подписки.",
+            "es": "Recibir progreso, preguntas y resultados. Necesario para nuevas tareas; al desactivarlo siguen disponibles consultas y parada explícita.",
+            "pt": "Receber progresso, perguntas e resultados. Necessário para novas tarefas; ao desligar continuam disponíveis consultas e parada explícita."
           },
           "default": true
         },

@@ -165,6 +165,7 @@ def _make_service(*, push_calls: list | None = None) -> tuple[McbotService, list
 
     def fake_push(**kwargs):
         captured.append(kwargs)
+        return {"submitted": True}
 
     service = McbotService(logger=None, push_message_fn=fake_push)
     # Tests never touch the real runtime state directory; the cursor tests opt
@@ -189,22 +190,6 @@ _FRAME_SEQ = itertools.count(10_000)
 def _fresh(event: str, **payload) -> SseFrame:
     """Like ``_frame`` but with a unique id, so replays are not deduped."""
     return SseFrame(event=event, data=json.dumps(payload), id=str(next(_FRAME_SEQ)))
-
-
-def _milestone(task_id: int = 21, milestone_id: str = "a" * 64,
-               facts: str = "Collected 32/64 logs.", *, verified: bool = True) -> dict:
-    """A minimal mcbot ``progress.milestone`` payload."""
-    return {
-        "task_id": task_id,
-        "text": facts,
-        "milestone": {
-            "id": milestone_id,
-            "kind": "item",
-            "verified": verified,
-            "facts": facts,
-            "evidence": {"item": "minecraft:oak_log", "count": 32},
-        },
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -252,7 +237,6 @@ def test_configure_ignores_wrongly_typed_values():
         ("http://127.0.0.1:17897///", "http://127.0.0.1:17897"),
         ("", "http://127.0.0.1:17897"),
         ("   ", "http://127.0.0.1:17897"),
-        ("http://host:1/path", "http://host:1/path"),
     ],
 )
 def test_normalise_base_url(raw, expected):
@@ -333,15 +317,15 @@ async def test_stop_releases_a_waiting_slot():
     assert not service.has_pending_task()
 
 
-async def test_watchdog_releases_the_slot_when_no_completion_arrives():
+async def test_watchdog_keeps_the_slot_when_no_completion_arrives():
     service, pushes = _make_service()
     service._task_wait_timeout = 0.05
     claimed = await service.try_claim_pending("挖点木头")
     assert claimed is not None
     await asyncio.sleep(0.2)
-    # Without the watchdog a lost `done` event would wedge the slot forever
-    # and every later dispatch would answer "busy".
-    assert service._pending is None
+    assert service._pending is claimed
+    assert claimed.state == "unknown"
+    assert await service.try_claim_pending("重复任务") is None
     assert any(call["coalesce_key"].startswith("mcbot_timeout:") for call in pushes)
     await service.stop()
 
@@ -411,92 +395,6 @@ async def test_successful_tool_step_is_blind_and_panel_only():
     assert len(pushes) == 1
     assert pushes[0]["ai_behavior"] == "blind"
     assert pushes[0]["visibility"] == ["hud"]
-
-
-async def test_a_verified_milestone_is_a_respond_cue_and_not_a_done():
-    service, pushes = _make_service()
-    service.set_lang("en")
-    claimed = await service.try_claim_pending("gather 64 logs")
-    assert claimed is not None
-    claimed.awaiting_id = False
-
-    await service.handle_event(_fresh("progress", **_milestone(task_id=21)))
-
-    milestones = [c for c in pushes if c["coalesce_key"].startswith("mcbot_milestone:")]
-    assert len(milestones) == 1
-    cue = milestones[0]
-    assert cue["ai_behavior"] == "respond"
-    assert cue["priority"] == 6
-    text = cue["parts"][0]["text"]
-    assert "key milestone" in text
-    assert "not the whole task" in text
-    assert "Collected 32/64 logs." in text
-    # A stage node never releases the task slot or resolves the waiter.
-    assert service.has_pending_task()
-    assert not claimed.event.is_set()
-    await service.stop()
-
-
-async def test_milestone_is_deduped_by_session_task_and_node_id():
-    service, pushes = _make_service()
-    service.set_lang("en")
-    service._session_id = "sess"
-    payload = _milestone(task_id=22)
-
-    await service.handle_event(_fresh("progress", **payload))
-    await service.handle_event(_fresh("progress", **payload))
-
-    milestones = [c for c in pushes if c["coalesce_key"].startswith("mcbot_milestone:")]
-    assert len(milestones) == 1
-    await service.stop()
-
-
-async def test_milestone_before_the_post_returns_is_parked_then_replayed_in_order():
-    service, pushes = _make_service()
-    service.set_lang("en")
-    client = _FakeClient(task_id=77)
-    service._client = client
-    claimed = await service.try_claim_pending("gather 64 logs")
-    assert claimed is not None
-    assert claimed.awaiting_id is True
-
-    await service.handle_event(_fresh("progress", **_milestone(task_id=77)))
-    await service.handle_event(_fresh("done", task_id=77, text="Done.", status="completed"))
-    assert [kind for kind, _ in claimed.buffered] == ["milestone", "done"]
-
-    await service.dispatch_claimed(claimed)
-
-    cues = [c for c in pushes if c["coalesce_key"].startswith(("mcbot_milestone:", "mcbot_done:"))]
-    assert [c["coalesce_key"].split(":")[0] for c in cues] == ["mcbot_milestone", "mcbot_done"]
-    await service.stop()
-
-
-async def test_unverified_or_unassociated_milestones_fall_back_to_ordinary_progress():
-    service, pushes = _make_service()
-    service.set_lang("en")
-
-    await service.handle_event(_fresh("progress", **_milestone(verified=False)))
-    await service.handle_event(_fresh("progress", **_milestone(task_id=0)))
-
-    assert [c for c in pushes if c["coalesce_key"].startswith("mcbot_milestone:")] == []
-    await service.stop()
-
-
-async def test_another_tasks_milestone_is_narrated_without_releasing_our_slot():
-    service, pushes = _make_service()
-    service.set_lang("en")
-    claimed = await service.try_claim_pending("mine")
-    assert claimed is not None
-    claimed.task_id = 5
-    claimed.awaiting_id = False
-
-    await service.handle_event(_fresh("progress", **_milestone(task_id=99)))
-
-    milestones = [c for c in pushes if c["coalesce_key"].startswith("mcbot_milestone:")]
-    assert len(milestones) == 1
-    assert service.has_pending_task()
-    assert not claimed.event.is_set()
-    await service.stop()
 
 
 async def test_guardrail_and_job_progress_are_blind():
@@ -594,7 +492,7 @@ async def test_a_plain_continue_task_keeps_the_finished_frame():
         _frame("done", task_id=15, text="继续挖了三格圆石。", status="completed")
     )
     text = [c for c in pushes if c["coalesce_key"].startswith("mcbot_done:")][0]["parts"][0]["text"]
-    assert "I finished" in text
+    assert "Task result receipt" in text
     assert "Command receipt" not in text
 
 
@@ -653,7 +551,7 @@ async def test_a_failed_command_keeps_the_failure_frame():
     assert "didn't pull it off" in cues[0]["parts"][0]["text"]
 
 
-async def test_an_ordinary_task_still_gets_the_finished_frame():
+async def test_an_ordinary_task_gets_a_result_receipt_without_asserting_success():
     service, pushes = _make_service()
     service.set_lang("en")
     service._client = _FakeClient(task_id=13)
@@ -664,7 +562,9 @@ async def test_an_ordinary_task_still_gets_the_finished_frame():
         _frame("done", task_id=13, text="Collected 3 logs.", status="completed")
     )
     text = [c for c in pushes if c["coalesce_key"].startswith("mcbot_done:")][0]["parts"][0]["text"]
-    assert "I finished" in text
+    assert "Task result receipt" in text
+    assert "does not prove goal success" in text
+    assert "Collected 3 logs." in text
 
 
 async def test_dispatch_sends_wait_s_as_an_integer():
@@ -789,22 +689,26 @@ async def test_answer_on_an_expired_question_is_reported_as_such():
     service._client = _FakeClient(
         raise_on={"answer": McbotBridgeError("gone", status=404, code="BRIDGE_HTTP_ERROR")}
     )
+    await service.handle_event(_fresh("question", question_id="q-old", text="A pending question"))
     result = await service.answer("q-old", "烧")
     assert result["is_error"] is True
     assert result["error"] == "QUESTION_EXPIRED"
 
 
-async def test_ask_returns_the_companions_answer_verbatim():
+async def test_ask_observes_without_creating_a_new_task():
     service, _ = _make_service()
     service._client = _FakeClient(ask_answer="在挖石头")
-    assert "在挖石头" in await service.ask("你在干嘛")
+    result = await service.ask("你在干嘛")
+    assert result["output"]["observation"]["executor"]["in_game"] is True
+    assert service._client.calls == [("get_status",)]
 
 
-async def test_ask_falls_back_when_the_companion_stays_silent():
+async def test_ask_does_not_invent_missing_game_facts():
     service, _ = _make_service()
     service._client = _FakeClient(ask_answer="")
     result = await service.ask("你在干嘛")
-    assert isinstance(result, str) and result
+    assert result["output"]["observation"]["latest_progress"] == {}
+    assert "unknown" in result["output"]["summary"]
 
 
 async def test_cancel_without_a_client_is_an_error():
@@ -985,6 +889,7 @@ async def test_a_failed_done_is_never_framed_as_success(status):
     claimed = await service.try_claim_pending("挖点木头")
     assert claimed is not None
     claimed.awaiting_id = False
+    claimed.task_id = 1
 
     await service.handle_event(
         _frame("done", task_id=1, text="找不到路", status=status, session_id=service._session_id)
@@ -1004,6 +909,7 @@ async def test_cancelled_and_superseded_dones_stay_silent(status):
     claimed = await service.try_claim_pending("挖点木头")
     assert claimed is not None
     claimed.awaiting_id = False
+    claimed.task_id = 1
 
     await service.handle_event(
         _frame("done", task_id=1, text="已取消", status=status, session_id=service._session_id)
@@ -1112,11 +1018,13 @@ def test_error_envelope_carries_no_transport_detail(exc):
     assert envelope["output"]["error"]
 
 
-async def test_cancel_with_nothing_running_says_so():
+async def test_cancel_without_a_local_slot_still_contacts_the_bridge():
     from mcbot_bridge_plugin import prompts
 
     service, _ = _make_service()
-    assert await service.cancel(None) == prompts.t("CANCEL_NOTHING", lang=service._lang)
+    service._client = _FakeClient()
+    assert await service.cancel(None) == prompts.t("CANCEL_OK", lang=service._lang)
+    assert service._client.calls == [("cancel_task", None)]
 
 
 async def test_cancel_of_another_task_id_leaves_the_pending_task_running():
@@ -1185,6 +1093,7 @@ async def test_answer_without_an_id_is_refused_when_none_are_open():
 async def test_explicit_answer_id_is_forwarded_to_the_bridge():
     service, _ = _make_service()
     service._client = _FakeClient()
+    await service.handle_event(_fresh("question", question_id="q42", text="Current question"))
     await service.answer("q42", "好")
     assert ("answer", "q42", "好") in service._client.calls
 
@@ -1317,6 +1226,7 @@ class _FacadeStub:
 
 async def test_task_result_carries_the_open_question_hint(plugin_module):
     service, _ = _make_service()
+    service._client = _FakeClient()
     await service.handle_event(_frame("question", question_id="q1", text="打还是侦察"))
     await service.try_claim_pending("占着槽位")  # force the busy branch
     await _settle()
@@ -1325,11 +1235,13 @@ async def test_task_result_carries_the_open_question_hint(plugin_module):
         _FacadeStub(service), text="我们先侦查"
     )
 
-    assert "mcbot_answer" in result
+    assert not result.is_ok()
+    assert "mcbot_answer" in result.error
 
 
 async def test_task_result_omits_the_hint_when_nothing_is_open(plugin_module):
     service, _ = _make_service()
+    service._client = _FakeClient()
     await service.try_claim_pending("占着槽位")
     await _settle()
 
@@ -1337,7 +1249,8 @@ async def test_task_result_omits_the_hint_when_nothing_is_open(plugin_module):
         _FacadeStub(service), text="我们先侦查"
     )
 
-    assert "mcbot_answer" not in result
+    assert not result.is_ok()
+    assert "mcbot_answer" not in result.error
 
 
 # ---------------------------------------------------------------------------

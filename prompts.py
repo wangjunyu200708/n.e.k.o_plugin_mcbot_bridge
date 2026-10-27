@@ -110,6 +110,16 @@ _INTERNAL_STATE_GAG: Dict[str, str] = {
 # ===========================================================================
 
 PROMPTS: Dict[str, Dict[str, str]] = {
+    "RESULT_CONTEXT": {
+        "zh": "原始游戏任务：{directive}\n执行端实际回执：\n{text}\n请先说清这项游戏任务的具体成果和仍未完成的部分。配置重载、查询成功或其他行动回执不能代替这项任务的结果；不要只说“行动任务完成”。",
+        "zh-TW": "原始遊戲任務：{directive}\n執行端實際回執：\n{text}\n請先說清這項遊戲任務的具體成果與仍未完成的部分。設定重載、查詢成功或其他行動回執不能代替這項任務的結果；不要只說「行動任務完成」。",
+        "en": "Original Minecraft request: {directive}\nExecutor's actual receipt:\n{text}\nReport the concrete outcome and any unfinished work for this request. Configuration reloads, successful queries and other action receipts are not this task's outcome. Do not merely announce that an action completed.",
+        "ja": "元のゲーム依頼：{directive}\n実行側の実際の報告：\n{text}\nこの依頼の具体的な成果と未完了部分を先に伝えて。設定の再読込や照会の成功は、この依頼の完了ではない。単に操作が完了したと言わないで。",
+        "ko": "원래 게임 요청: {directive}\n실행 측의 실제 결과:\n{text}\n이 요청의 구체적인 성과와 미완료 부분을 먼저 전해. 설정 재로드나 조회 성공은 이 작업의 완료가 아니야. 단순히 동작 완료라고만 말하지 마.",
+        "ru": "Исходная игровая задача: {directive}\nФактический отчёт исполнителя:\n{text}\nСообщи конкретный результат и незавершённую работу. Перезагрузка настроек и успешный запрос не означают выполнения этой задачи. Не ограничивайся словами о завершении действия.",
+        "es": "Petición original del juego: {directive}\nInforme real del ejecutor:\n{text}\nCuenta el resultado concreto y lo pendiente. Recargar la configuración o consultar datos no completa esta tarea. No digas solamente que terminó una acción.",
+        "pt": "Pedido original no jogo: {directive}\nRelato real do executor:\n{text}\nInforme o resultado concreto e o que falta. Recarregar configurações ou consultar dados não conclui esta tarefa. Não diga apenas que uma ação terminou.",
+    },
     # -- progress: one step of a task finished ---------------------------------
     "CUE_PROGRESS": {
         "zh": "[我这边的进展{identity}] {text}",
@@ -122,6 +132,16 @@ PROMPTS: Dict[str, Dict[str, str]] = {
         "pt": "[Meu progresso{identity}] {text}",
     },
     # -- progress, failed step: a mid-task tool failure, not the outcome -------
+    "CUE_MILESTONE": {
+        "zh": "[我完成了一个关键节点{identity}] 原任务：{directive}\n已核实事实：{text}\n用我的第一人称简短告诉 {{MASTER_NAME}} 这项阶段成果。按证据区分已有物品、净新增和实际制作，不补造过程或下一步已完成。这是阶段记录，整体状态以最新结果为准；不说全部完成，不重新派发任务，不要求主人继续操作。\n{internal_gag}",
+        "zh-TW": "[我完成了一個關鍵節點{identity}] 原任務：{directive}\n已核實事實：{text}\n用我的第一人稱簡短告訴 {{MASTER_NAME}} 這項階段成果。區分已有物品、淨新增與實際製作，不虛構過程或下一步已完成。這是階段記錄，整體狀態以最新結果為準；不說全部完成，不重新派發，也不要求主人操作。\n{internal_gag}",
+        "en": "[I reached a milestone{identity}] Original task: {directive}\nVerified facts: {text}\nBriefly tell {{MASTER_NAME}} this intermediate achievement in my first person. Distinguish inventory possession, net gains and proven crafting; invent no cause or completed next step. This is a stage record; the latest result governs overall status. Do not claim full completion, redispatch work or ask the owner to carry on.\n{internal_gag}",
+        "ja": "[節目を達成した{identity}] 元の依頼：{directive}\n確認済みの事実：{text}\n私の一人称で {{MASTER_NAME}} に短く伝えて。所持・純増・実際の製作を区別し、過程や次の工程の完了を捏造しない。これは段階の記録で、全体の状態は最新の結果に従う。全完了とは言わず、再依頼や主人への作業要求もしない。\n{internal_gag}",
+        "ko": "[중요한 단계를 달성했어{identity}] 원래 작업: {directive}\n확인된 사실: {text}\n내 1인칭으로 {{MASTER_NAME}} 에게 짧게 알려줘. 보유, 순증가, 입증된 제작을 구분하고 과정이나 다음 단계 완료를 지어내지 마. 단계 기록이며 전체 상태는 최신 결과를 따라야 해. 전부 완료했다고 하거나 재지시하거나 주인에게 작업을 요구하지 마.\n{internal_gag}",
+        "ru": "[Я достигла промежуточной цели{identity}] Исходная задача: {directive}\nПроверенные факты: {text}\nКратко сообщи {{MASTER_NAME}} от первого лица. Различай наличие предметов, чистый прирост и подтверждённое изготовление; не выдумывай причины или завершение следующего шага. Это запись этапа; общий статус определяется последним результатом. Не объявляй всё готовым, не отправляй задачу повторно и не проси хозяина продолжать самому.\n{internal_gag}",
+        "es": "[Alcancé un hito{identity}] Tarea original: {directive}\nHechos verificados: {text}\nCuéntaselo brevemente a {{MASTER_NAME}} en mi primera persona. Distingue posesión, aumento neto y fabricación demostrada; no inventes causas ni pasos siguientes terminados. Es un registro de etapa; el último resultado determina el estado general. No anuncies su finalización, no la reenvíes ni pidas al dueño que trabaje.\n{internal_gag}",
+        "pt": "[Alcancei uma etapa importante{identity}] Tarefa original: {directive}\nFatos verificados: {text}\nConte brevemente a {{MASTER_NAME}} na minha primeira pessoa. Diferencie posse, aumento líquido e fabricação comprovada; não invente causas nem próximas etapas concluídas. É um registro de etapa; o último resultado determina o estado geral. Não anuncie conclusão total, reenvie a tarefa ou peça ao dono para trabalhar.\n{internal_gag}",
+    },
     "CUE_PROGRESS_MIDWAY": {
         "zh": "[我这边一步没成{identity}] {text}\n这只是中途的一步，我可能还会接着补救，不算最后结果。除非有影响，别特意提。",
         "zh-TW": "[我這邊一步沒成{identity}] {text}\n這只是中途的一步，我可能還會接著補救，不算最後結果。除非有影響，別特意提。",
@@ -132,32 +152,20 @@ PROMPTS: Dict[str, Dict[str, str]] = {
         "es": "[Un paso no funcionó{identity}] {text}\nEs solo un paso intermedio, no el resultado final; puede que aún me recupere. No lo presentes como resultado; menciónalo solo si importa.",
         "pt": "[Um passo não deu certo{identity}] {text}\nIsto é só um passo intermediário, não o resultado final — posso ainda me recuperar. Não apresente como resultado; mencione só se importar.",
     },
-    # -- milestone: a verified key node, not the whole task --------------------
-    "CUE_MILESTONE": {
-        "zh": "[我这边完成了一个关键节点{identity}] {text}\n这是阶段成果，不是整项任务完成。用自己的话告诉 {{MASTER_NAME}}，然后继续原任务。\n{internal_gag}",
-        "zh-TW": "[我這邊完成了一個關鍵節點{identity}] {text}\n這是階段成果，不是整項任務完成。用自己的話告訴 {{MASTER_NAME}}，然後繼續原任務。\n{internal_gag}",
-        "en": "[I reached a key milestone{identity}] {text}\nThis is a stage result, not the whole task. Tell {{MASTER_NAME}} in your own words, then continue the task.\n{internal_gag}",
-        "ja": "[重要な節目を達成した{identity}] {text}\nこれは段階的な成果で、タスク全体の完了ではない。{{MASTER_NAME}} に自分の言葉で伝えて、そのまま元のタスクを続けて。\n{internal_gag}",
-        "ko": "[중요한 단계를 달성했어{identity}] {text}\n이건 단계적 성과야, 전체 작업 완료가 아니야. {{MASTER_NAME}} 에게 네 말로 전하고 원래 작업을 계속해.\n{internal_gag}",
-        "ru": "[Я достигла важного этапа{identity}] {text}\nЭто промежуточный результат, а не завершение всей задачи. Расскажи {{MASTER_NAME}} своими словами и продолжай исходную задачу.\n{internal_gag}",
-        "es": "[Alcancé un hito importante{identity}] {text}\nEs un resultado de etapa, no la tarea completa. Cuéntaselo a {{MASTER_NAME}} con tus palabras y continúa la tarea original.\n{internal_gag}",
-        "pt": "[Alcancei um marco importante{identity}] {text}\nÉ um resultado de etapa, não a tarefa inteira. Conte a {{MASTER_NAME}} com suas palavras e continue a tarefa original.\n{internal_gag}",
-    },
-    # -- done: the task ended successfully -------------------------------------
+    # -- done: normal transport completion, not proof of goal satisfaction -----
     "CUE_DONE": {
-        "zh": "[我这边做完了{identity}] {text}\n我已经停下来了。把结果用自己的话讲给 {{MASTER_NAME}} 听，别把原话照念。\n{internal_gag}",
-        "zh-TW": "[我這邊做完了{identity}] {text}\n我已經停下來了。把結果用自己的話講給 {{MASTER_NAME}} 聽，別把原話照念。\n{internal_gag}",
-        "en": "[I finished{identity}] {text}\nI've stopped now. Tell {{MASTER_NAME}} how it went in your own words; don't read this back literally.\n{internal_gag}",
-        "ja": "[私の完了{identity}] {text}\nもう手を止めた。結果を {{MASTER_NAME}} に自分の言葉で伝えて。そのまま読み上げないで。\n{internal_gag}",
-        "ko": "[나 끝냈어{identity}] {text}\n이제 멈췄어. 결과를 {{MASTER_NAME}} 에게 네 말로 전해줘. 그대로 읽지 마.\n{internal_gag}",
-        "ru": "[Я закончила{identity}] {text}\nЯ уже остановилась. Расскажи {{MASTER_NAME}} своими словами, как всё прошло; не зачитывай дословно.\n{internal_gag}",
-        "es": "[Terminé{identity}] {text}\nYa me detuve. Cuéntale a {{MASTER_NAME}} cómo fue con tus palabras; no leas esto literalmente.\n{internal_gag}",
-        "pt": "[Terminei{identity}] {text}\nJá parei. Conte a {{MASTER_NAME}} como foi, com suas palavras; não leia isso ao pé da letra.\n{internal_gag}",
+        "zh": "[本次任务的结果回执{identity}] {text}\n本次作答已结束，是否达成目标须依据回执中的实际核验。用第一人称如实告诉 {{MASTER_NAME}}：已核实完成、部分完成、受阻或未知。不能仅凭正常结束说“做好了”，也不能推断身体已停止。不要据此重新派活。\n{internal_gag}",
+        "zh-TW": "[本次任務的結果回執{identity}] {text}\n本次作答已結束，是否達成目標須依據回執中的實際核驗。用第一人稱如實告訴 {{MASTER_NAME}}：已核實完成、部分完成、受阻或未知。不能僅憑正常結束說「做好了」，也不能推斷身體已停止。不要據此重新派工作。\n{internal_gag}",
+        "en": "[Task result receipt{identity}] {text}\nThis answer ended normally; that alone does not prove goal success or a stopped body. Tell {{MASTER_NAME}} the observed result in your own voice: verified success, partial work, blocked, or unknown. Preserve qualifications and do not redispatch work from this cue.\n{internal_gag}",
+        "ja": "[タスクの結果報告{identity}] {text}\n正常な応答終了だけでは目標達成や身体の停止を証明しない。確認済みの完了、一部完了、障害、不明を区別し、一人称で {{MASTER_NAME}} に正確に伝えて。この通知から再実行しないで。\n{internal_gag}",
+        "ko": "[작업 결과{identity}] {text}\n정상 응답 종료만으로 목표 달성이나 몸의 정지를 증명하지 않아. 확인된 완료, 일부 완료, 장애, 알 수 없음을 구분해 {{MASTER_NAME}} 에게 1인칭으로 정확히 전해. 이 알림으로 작업을 다시 보내지 마.\n{internal_gag}",
+        "ru": "[Результат задачи{identity}] {text}\nНормальный ответ сам по себе не доказывает достижение цели или остановку тела. От первого лица сообщи {{MASTER_NAME}} подтверждённый результат: успех, часть работы, препятствие или неизвестность. Не отправляй задачу повторно из-за уведомления.\n{internal_gag}",
+        "es": "[Resultado de la tarea{identity}] {text}\nUna respuesta normal no demuestra el objetivo cumplido ni que el cuerpo se detuvo. Cuenta a {{MASTER_NAME}} en primera persona el resultado observado: éxito verificado, parcial, bloqueo o desconocido. No vuelvas a enviar la tarea por este aviso.\n{internal_gag}",
+        "pt": "[Resultado da tarefa{identity}] {text}\nUma resposta normal não prova o objetivo cumprido nem a parada do corpo. Conte a {{MASTER_NAME}} em primeira pessoa o resultado observado: sucesso verificado, parcial, bloqueio ou desconhecido. Não reenvie a tarefa por este aviso.\n{internal_gag}",
     },
-    # -- command receipt: mcbot answers 恢复目标/目标状态/放弃目标 and a stopped
-    # building's 继续/继续建造/继续施工 as commands --
-    # Its AgentRunner reports COMPLETED for these commands, but BRIDGE.md is
-    # explicit that a command's completed only means "accepted". Framing one as
+    # -- command receipt: mcbot answers 恢复目标/目标状态/放弃目标 as commands --
+    # Its AgentRunner reports COMPLETED for all three, but BRIDGE.md is explicit
+    # that a command's completed only means "accepted". Framing any of them as
     # "I finished" tells the owner a goal is satisfied when it is not.
     "CUE_COMMAND_RECEIPT": {
         "zh": "[命令回执{identity}] {text}\n这不是任务完成，只是命令「{command}」的受理或查询回执。按回执的原意用自己的话告诉 {{MASTER_NAME}}，别说成「做好了」，也别说成「我停下来了」。\n{internal_gag}",
@@ -171,14 +179,14 @@ PROMPTS: Dict[str, Dict[str, str]] = {
     },
     # -- done with a non-completed status --------------------------------------
     "CUE_DONE_FAILED": {
-        "zh": "[我这边没做成{identity}] {text}\n（状态：{status}）我停下来了。如实告诉 {{MASTER_NAME}} 没成，别包装成做好了。\n{internal_gag}",
-        "zh-TW": "[我這邊沒做成{identity}] {text}\n（狀態：{status}）我停下來了。如實告訴 {{MASTER_NAME}} 沒成，別包裝成做好了。\n{internal_gag}",
-        "en": "[I didn't pull it off{identity}] {text}\n(status: {status}) I've stopped. Tell {{MASTER_NAME}} plainly that it didn't work — don't dress it up as done.\n{internal_gag}",
-        "ja": "[私はやり遂げられなかった{identity}] {text}\n（状態：{status}）もう手を止めた。うまくいかなかったことを {{MASTER_NAME}} に正直に伝えて。できたように装わないで。\n{internal_gag}",
-        "ko": "[나 못 해냈어{identity}] {text}\n(상태: {status}) 이제 멈췄어. 안 됐다고 {{MASTER_NAME}} 에게 솔직히 말해. 된 것처럼 포장하지 마.\n{internal_gag}",
-        "ru": "[У меня не получилось{identity}] {text}\n(статус: {status}) Я остановилась. Честно скажи {{MASTER_NAME}}, что не вышло — не подавай это как успех.\n{internal_gag}",
-        "es": "[No lo logré{identity}] {text}\n(estado: {status}) Me detuve. Dile a {{MASTER_NAME}} con claridad que no salió; no lo presentes como hecho.\n{internal_gag}",
-        "pt": "[Não consegui{identity}] {text}\n(status: {status}) Parei. Diga a {{MASTER_NAME}} com franqueza que não deu certo — não apresente como concluído.\n{internal_gag}",
+        "zh": "[我这边没做成{identity}] {text}\n（状态：{status}）如实告诉 {{MASTER_NAME}} 失败原因和已做部分，别包装成做好了，也不推断身体已停止。不要自动重派。\n{internal_gag}",
+        "zh-TW": "[我這邊沒做成{identity}] {text}\n（狀態：{status}）如實告訴 {{MASTER_NAME}} 失敗原因和已做部分，別包裝成做好了，也不推斷身體已停止。不要自動重派。\n{internal_gag}",
+        "en": "[I didn't pull it off{identity}] {text}\n(status: {status}) Tell {{MASTER_NAME}} the actual failure and any partial work. Do not claim success or infer that the body stopped. Do not automatically redispatch.\n{internal_gag}",
+        "ja": "[私はやり遂げられなかった{identity}] {text}\n（状態：{status}）失敗理由と実際にできた部分を {{MASTER_NAME}} に伝えて。成功や身体の停止を推測せず、自動で再実行しないで。\n{internal_gag}",
+        "ko": "[나 못 해냈어{identity}] {text}\n(상태: {status}) 실패 이유와 실제로 한 부분을 {{MASTER_NAME}} 에게 전해. 성공이나 몸의 정지를 추측하지 말고 자동으로 다시 보내지 마.\n{internal_gag}",
+        "ru": "[У меня не получилось{identity}] {text}\n(статус: {status}) Сообщи {{MASTER_NAME}} причину неудачи и фактическую часть работы. Не утверждай успех или остановку тела. Не отправляй задачу повторно автоматически.\n{internal_gag}",
+        "es": "[No lo logré{identity}] {text}\n(estado: {status}) Cuenta a {{MASTER_NAME}} el fallo y el trabajo parcial real. No afirmes éxito ni supongas que el cuerpo se detuvo. No reenvíes automáticamente.\n{internal_gag}",
+        "pt": "[Não consegui{identity}] {text}\n(status: {status}) Conte a {{MASTER_NAME}} a falha e o trabalho parcial real. Não afirme sucesso nem suponha a parada do corpo. Não reenvie automaticamente.\n{internal_gag}",
     },
     # -- timeout: the wait budget ran out; the outcome is unknown --------------
     "CUE_TIMEOUT": {
@@ -285,14 +293,14 @@ PROMPTS: Dict[str, Dict[str, str]] = {
         "pt": "Já estou ocupada com: {current}. Espere terminar ou chame de novo com overwrite=true para mudar de rumo.",
     },
     "TASK_DISPATCHED_ACK": {
-        "zh": "已经交出去了。做完我会自己来说，别在这儿等结果。",
-        "zh-TW": "已經交出去了。做完我會自己來說，別在這兒等結果。",
-        "en": "Handed it off. I'll report back when it's done — don't wait here for the result.",
-        "ja": "渡した。終わったら私から言う。ここで結果を待たないで。",
-        "ko": "넘겼어. 끝나면 내가 먼저 알려줄게. 여기서 결과를 기다리지 마.",
-        "ru": "Передала. Когда закончу — сама сообщу, не жди результата здесь.",
-        "es": "Ya lo pasé. Avisaré yo al terminar; no esperes el resultado aquí.",
-        "pt": "Passei adiante. Eu aviso quando terminar — não espere o resultado aqui.",
+        "zh": "游戏身体已接到这项任务，目前只是受理，尚无完成结果。用第一人称简短告诉 {{MASTER_NAME}}“我去做，拿到实际结果再告诉你”；是你在执行，不要让主人自己去采集或替你操作。等待后续结果通知，继续正常聊天，不重派任务。",
+        "zh-TW": "遊戲身體已接到這項任務，目前只是受理，尚無完成結果。用第一人稱簡短告訴 {{MASTER_NAME}}「我去做，取得實際結果再告訴你」；是你在執行，不要讓主人自己採集或替你操作。等待後續結果通知，繼續正常聊天，不重派任務。",
+        "en": "Your game body accepted this task; there is no completion result yet. Briefly acknowledge in first person that you will do it and report the actual outcome. You are the executor; do not tell {MASTER_NAME} to do the gathering or operate for you. Continue chatting, await the result cue, and do not redispatch.",
+        "ja": "ゲーム内の身体が依頼を受け付けた。まだ完了結果はない。私が実行して実際の結果を伝えると、一人称で短く答えて。{MASTER_NAME} に採集や操作を任せないで。会話を続け、結果通知を待ち、再実行しないで。",
+        "ko": "게임 속 몸이 요청을 받았고 아직 완료 결과는 없어. 내가 실행하고 실제 결과를 알려주겠다고 1인칭으로 짧게 말해. {MASTER_NAME} 에게 채집이나 조작을 맡기지 마. 대화를 계속하고 결과 알림을 기다리며 다시 보내지 마.",
+        "ru": "Тело в игре приняло задачу; результата ещё нет. Коротко скажи от первого лица, что выполнишь её и сообщишь фактический итог. Не поручай сбор или управление {MASTER_NAME}. Продолжай разговор и жди отчёта, не отправляя задачу заново.",
+        "es": "Tu cuerpo en el juego aceptó la tarea; aún no hay resultado. Confirma brevemente en primera persona que la harás y comunicarás el resultado real. No pidas a {MASTER_NAME} que recolecte o maneje por ti. Sigue conversando y espera el aviso sin reenviar la tarea.",
+        "pt": "Seu corpo no jogo aceitou a tarefa; ainda não há resultado. Confirme brevemente em primeira pessoa que vai executá-la e relatar o resultado real. Não peça a {MASTER_NAME} para coletar ou operar por você. Continue conversando e espere o aviso sem reenviar a tarefa.",
     },
     # Appended to mcbot_task's result while a reverse question is still open.
     # Without it the model reads the owner's answer as a fresh instruction —
@@ -549,6 +557,37 @@ PROMPTS: Dict[str, Dict[str, str]] = {
     },
 }
 
+PROMPTS.update({
+    "CUE_RESULT_UNKNOWN": {
+        "zh": "[结果尚未核实{identity}] {text}\n本次没有可确认的终态，如实告诉 {{MASTER_NAME}} 仍未知，不说完成或已停手，也不重新派活。\n{internal_gag}",
+        "en": "[Unverified result{identity}] {text}\nNo valid terminal status was received. Tell {{MASTER_NAME}} the outcome is unknown; do not claim success or a stopped body, and do not redispatch.\n{internal_gag}",
+    },
+    "SUBMISSION_UNKNOWN": {
+        "zh": "这次指令是否受理尚未确认，仍可能执行。已保留跟踪，不要重复派发；需要停止时明确叫停。",
+        "en": "Acceptance is unknown and the instruction may be executing. Tracking is retained. Do not resend; use an explicit stop if needed.",
+    },
+    "RUNTIME_UNAVAILABLE": {
+        "zh": "本地任务记录暂时无法可靠保存或读取，这次没有派发新任务。已有游戏任务的结果不能据此推断。",
+        "en": "Local task records cannot be reliably saved or read. No new task was dispatched; this says nothing about existing game work.",
+    },
+    "EXECUTOR_UNAVAILABLE": {
+        "zh": "当前世界、身体或执行大脑尚未就绪，这次没有派发任务。",
+        "en": "The world, body or executor is not ready. No task was dispatched.",
+    },
+    "EVENTS_REQUIRED": {
+        "zh": "任务反馈已关闭，无法可靠接收问题和结果。这次没有派发任务，请先开启事件接收。",
+        "en": "Event reception is disabled, so questions and results cannot be tracked reliably. Enable it before dispatching work.",
+    },
+    "REMOTE_BUSY": {
+        "zh": "游戏中已有任务，或任务归属无法确认。这次没有追加或替换任务；可以查询进展，或明确叫停。",
+        "en": "Game work is already active or its ownership is unknown. No work was added or replaced. Observe progress or explicitly stop.",
+    },
+    "OBSERVATION_ONLY": {
+        "zh": "这里只读取执行状态和最近收到的事实，没有派发新任务。按观察时间陈述进展；缺少的背包、现场和完成证据仍为未知，不能猜测或自动补派任务。",
+        "en": "Observation only: execution status and previously received facts; no new work was submitted. Respect observation timestamps. Missing inventory, world and goal evidence is unknown; do not invent facts or dispatch work to fill gaps.",
+    },
+})
+
 # ===========================================================================
 # Bridge error codes (v1.0 ``error_code``), mapped to something the character
 # can say. The bridge's own ``error`` text is prose written for operators and
@@ -643,9 +682,9 @@ BRIDGE_ERROR_MESSAGES: Dict[str, Dict[str, str]] = {
 # Fallback for a code this plugin does not know: the bridge may add categories,
 # and a connector must not choke on one it has not seen.
 _BRIDGE_ERROR_FALLBACK: Dict[str, str] = {
-    "zh": "同伴那边出了点状况（{status}），这件事没办成。",
+    "zh": "暂时没有取得可靠回执（{status}），这次是否执行或完成仍未知，不要自动重发。",
     "zh-TW": "同伴那邊出了點狀況（{status}），這件事沒辦成。",
-    "en": "Something went wrong on your companion's side ({status}) — that didn't go through.",
+    "en": "No reliable receipt was obtained ({status}); execution and completion are unknown. Do not automatically resend.",
     "ja": "相棒側で問題が起きた（{status}）。これは通らなかった。",
     "ko": "동료 쪽에서 문제가 생겼어 ({status}). 이건 안 됐어.",
     "ru": "На стороне спутницы что-то пошло не так ({status}) — не прошло.",

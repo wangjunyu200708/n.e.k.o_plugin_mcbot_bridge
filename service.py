@@ -19,6 +19,7 @@ injected callable, which keeps the service unit-testable on its own.
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import os
 import sys
@@ -26,6 +27,7 @@ import time
 from collections import deque
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
+from urllib.parse import urlsplit
 
 from . import prompts
 from .client import (
@@ -42,9 +44,7 @@ DEFAULT_BASE_URL = "http://127.0.0.1:17897"
 # v1.0 one, and must not be treated as passing v1.0 acceptance.
 CONTRACT_VERSION = "1.0"
 
-# Task terminal statuses. Only "completed" is success — cancelled and
-# superseded mean the work stopped, not that it finished, and reporting either
-# as success is the exact trap the sibling plugin documents.
+# completed means a normal answer, not independently verified goal success.
 TASK_STATUS_COMPLETED = "completed"
 TASK_STATUSES_TERMINAL = ("completed", "failed", "cancelled", "superseded")
 # Statuses that are non-events for narration: the task was replaced or stopped
@@ -59,10 +59,10 @@ TASK_STATUSES_SILENT = ("cancelled", "superseded")
 # Narrating any of them as "I finished" tells the owner a goal is satisfied.
 COMMAND_DIRECTIVES = ("恢复目标", "目标状态", "放弃目标")
 
-# These three are commands only while a stopped construction is retained; with
-# no retained construction they are ordinary directives ("继续" can mean "keep
-# digging"). The resumed-command done text starts with the marker below, which
-# lets us tell the two cases apart without guessing from the directive alone.
+# Construction-resume words are commands only while a stopped construction is
+# retained; with no retained construction they are ordinary directives ("继续"
+# can mean "keep digging"). The resumed-command done text starts with the
+# marker below, which lets us tell the two cases apart without guessing.
 CONTINUATION_DIRECTIVES = ("继续", "继续建造", "继续施工")
 CONSTRUCTION_RESUME_MARKER = "已接回原建筑图与累计账"
 
@@ -97,12 +97,13 @@ _SEEN_FRAME_LIMIT = 256
 # write per tool step on the event path; the cost of being behind is a few
 # duplicated cues after a crash, against a whole replayed ring without it.
 _CURSOR_SAVE_INTERVAL_S = 5.0
+_HISTORY_LIMIT = 32
+_OUTBOX_LIMIT = 128
 
 # Priority scale is repo-wide, HIGHER = more important:
 #   alert 9 > question 8 > completion 7 > progress/state 4
 PRIORITY_STATE = 4
 PRIORITY_PROGRESS = 4
-PRIORITY_MILESTONE = 6
 PRIORITY_COMPLETION = 7
 PRIORITY_QUESTION = 8
 
@@ -181,6 +182,16 @@ def normalise_base_url(raw: Any) -> str:
         return DEFAULT_BASE_URL
     if "://" not in text:
         text = "http://" + text
+    parsed = urlsplit(text)
+    try:
+        local = parsed.hostname == "localhost" or ipaddress.ip_address(parsed.hostname or "").is_loopback
+    except ValueError:
+        local = False
+    if (not local or parsed.scheme != "http" or parsed.username or parsed.password
+            or parsed.path or parsed.query or parsed.fragment):
+        raise ValueError("The bridge must use a loopback HTTP address without credentials or a path")
+    if parsed.port is not None and not 1 <= parsed.port <= 65535:
+        raise ValueError("Invalid bridge port")
     return text
 
 
@@ -214,10 +225,10 @@ class PendingTask:
 
     __slots__ = (
         "text", "task_id", "started_at", "event", "result", "watchdog",
-        "awaiting_id", "buffered",
+        "awaiting_id", "buffered", "state", "target_lanlan", "created_at",
     )
 
-    def __init__(self, text: str) -> None:
+    def __init__(self, text: str, target_lanlan: Optional[str] = None) -> None:
         self.text = text
         self.task_id: Optional[int] = None
         self.started_at = time.monotonic()
@@ -229,11 +240,15 @@ class PendingTask:
         self.watchdog: Optional[asyncio.Task[None]] = None
         # True between claiming the slot and learning the task id from the
         # POST response. The bridge takes its event cursor *before* submitting,
-        # so a fast ``done`` or a key-node ``progress`` can land on the stream
-        # while the HTTP call is still in flight — those frames are parked here
-        # (tagged, in arrival order) and replayed once the id is known.
+        # so a fast ``done`` can land on the stream while the HTTP call is
+        # still in flight — those frames are parked here and replayed once the
+        # id is known, instead of being matched against a task we cannot yet
+        # identify.
         self.awaiting_id = True
-        self.buffered: list[tuple[str, Dict[str, Any]]] = []
+        self.buffered: list[Dict[str, Any]] = []
+        self.state = "claimed"
+        self.target_lanlan = target_lanlan
+        self.created_at = time.time()
 
 
 class McbotService:
@@ -297,26 +312,41 @@ class McbotService:
         # --- game state ---
         self._pending: Optional[PendingTask] = None
         self._pending_lock = asyncio.Lock()
+        self._operation_lock = asyncio.Lock()
+        self._storage_lock = asyncio.Lock()
         self._watchdogs: set[asyncio.Task[None]] = set()
         self._pending_questions: Dict[str, Dict[str, Any]] = {}
         self._seen_frames: set[tuple] = set()
         self._seen_frames_order: deque[tuple] = deque()
         self._finished_tasks: set[str] = set()
         self._finished_order: deque[str] = deque()
-        # Key-node notifications are deduplicated by (session, task, node id),
-        # independently of the SSE cursor: a reconnect can replay the same node
-        # under a new frame id, and the model must not hear it twice.
-        self._seen_milestones: set[tuple] = set()
-        self._seen_milestone_order: deque[tuple] = deque()
         # task_id -> the directive we dispatched, so a `done` can be framed by
         # what was asked. Only the command directives below need it; ordinary
         # work never consults this map.
         self._task_directives: Dict[int, str] = {}
         self._task_directive_order: deque[int] = deque()
-        self._last_progress_at = 0.0
-        self._last_state_at = 0.0
+        # A negative-infinity baseline means "never throttled yet". A fresh
+        # process (especially a CI runner) can have a monotonic clock smaller
+        # than the configured interval; 0.0 would then swallow the first cue.
+        self._last_progress_at = float("-inf")
+        self._last_state_at = float("-inf")
         self._last_event_at = 0.0
         self._last_stream_error = ""
+        self._live_status: Dict[str, Any] = {}
+        self._status_observed_at = 0.0
+        self._progress: Dict[int, Dict[str, Any]] = {}
+        self._task_targets: Dict[int, Optional[str]] = {}
+        self._history: deque[Dict[str, Any]] = deque(maxlen=_HISTORY_LIMIT)
+        self._outbox: Dict[str, Dict[str, Any]] = {}
+        self._submitted_notifications: deque[str] = deque(maxlen=_SEEN_FRAME_LIMIT)
+        self._delivery_task: Optional[asyncio.Task[None]] = None
+        self._runtime_loaded = False
+        self._restored_session = ""
+        self._storage_error = ""
+        self._restore_failed = False
+        self._last_runtime_encoded = ""
+        self._event_gap = False
+        self._retired_sessions: deque[str] = deque(maxlen=_SEEN_FRAME_LIMIT)
 
     # ==================================================================
     # Configuration
@@ -386,6 +416,10 @@ class McbotService:
         if existing is not None and not existing.done():
             return
         self._stopping = False
+        await self._load_runtime()
+        self._delivery_task = asyncio.create_task(
+            self._delivery_loop(), name="mcbot_bridge.delivery"
+        )
         self._bridge_task = asyncio.create_task(
             self._bridge_loop(), name="mcbot_bridge.bridge_loop"
         )
@@ -404,13 +438,30 @@ class McbotService:
             except Exception as exc:
                 self._log_warning("bridge loop shutdown error: {}", type(exc).__name__)
 
+        delivery = self._delivery_task
+        self._delivery_task = None
+        if delivery is not None:
+            delivery.cancel()
+            try:
+                await delivery
+            except asyncio.CancelledError:
+                pass
         for watchdog in tuple(self._watchdogs):
             watchdog.cancel()
         self._watchdogs.clear()
 
+        if self._pending is not None:
+            self._pending.state = "unknown"
+        try:
+            await self._persist_runtime()
+        except RuntimeError:
+            self._log_warning("shutdown could not checkpoint task records")
         # Before the client goes away: a clean stop that forgot the cursor
         # would hand the next run the bridge's whole ring buffer.
-        await self._flush_cursor()
+        try:
+            await self._flush_cursor()
+        except RuntimeError:
+            self._log_warning("shutdown could not checkpoint event cursor")
 
         client = self._client
         self._client = None
@@ -420,8 +471,11 @@ class McbotService:
         pending = self._pending
         self._pending = None
         if pending is not None and not pending.event.is_set():
-            pending.result = {"status": "cancelled", "query": pending.text}
+            pending.result = {"status": "unknown", "query": pending.text, "reason": "plugin_stopped"}
             pending.event.set()
+        self._runtime_loaded = False
+        self._restored_session = ""
+        self._session_id = ""
 
     async def _bridge_loop(self) -> None:
         """Own the connection policy: refresh the token, then stream.
@@ -531,9 +585,132 @@ class McbotService:
                 logger=self.logger,
             )
             await client.open()
+            client.checkpoint = self._maybe_persist_cursor
+            client.on_gap = self.mark_event_gap
             self._client = client
             return
         client.set_token(self._token)
+
+    # ==================================================================
+    # Durable local observations. No task is ever replayed from this file.
+    # ==================================================================
+
+    def _runtime_path(self) -> Optional[Path]:
+        return self._cursor_path.with_name("runtime.json") if self._cursor_path is not None else None
+
+    async def _persist_runtime(self) -> None:
+        path = self._runtime_path()
+        if path is None:
+            return
+        if self._restore_failed:
+            raise RuntimeError("Unreadable runtime state must not be overwritten")
+        async with self._storage_lock:
+            pending = self._pending
+            snapshot = {
+                "version": 1, "session_id": self._session_id or self._restored_session,
+                "pending": {
+                    "text": pending.text, "task_id": pending.task_id, "state": pending.state,
+                    "target_lanlan": pending.target_lanlan, "created_at": pending.created_at,
+                } if pending is not None else None,
+                "questions": self._pending_questions,
+                "directives": self._task_directives,
+                "targets": self._task_targets,
+                "finished": list(self._finished_order),
+                "history": list(self._history),
+                "outbox": self._outbox,
+                "submitted": list(self._submitted_notifications),
+                "seen_frames": list(self._seen_frames_order),
+                "progress": self._progress,
+                "event_gap": self._event_gap,
+            }
+            # Serialize on the event loop so asynchronous mutations cannot alter a write in flight.
+            encoded = json.dumps(snapshot, ensure_ascii=False)
+            if encoded == self._last_runtime_encoded and path.is_file():
+                return
+
+            def write() -> None:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                temporary = path.with_name(path.name + ".tmp")
+                temporary.write_text(encoded, encoding="utf-8")
+                os.replace(temporary, path)
+
+            try:
+                await asyncio.to_thread(write)
+            except OSError as exc:
+                self._storage_error = type(exc).__name__
+                raise RuntimeError("Bridge runtime state could not be saved") from exc
+            self._storage_error = ""
+            self._last_runtime_encoded = encoded
+
+    async def _load_runtime(self) -> None:
+        if self._runtime_loaded:
+            return
+        self._runtime_loaded = True
+        path = self._runtime_path()
+        if path is None:
+            return
+        try:
+            encoded = await asyncio.to_thread(path.read_text, encoding="utf-8")
+            if len(encoded) > 4_000_000:
+                raise ValueError("Local state is too large")
+            data = json.loads(encoded)
+            if not isinstance(data, dict) or data.get("version") != 1:
+                raise ValueError("Unsupported local state")
+            for key in ("questions", "directives", "targets", "outbox", "progress"):
+                if key in data and not isinstance(data[key], dict):
+                    raise ValueError("Invalid local state collection")
+            for key in ("finished", "history", "submitted", "seen_frames"):
+                if key in data and not isinstance(data[key], list):
+                    raise ValueError("Invalid local state history")
+            if len(data.get("outbox", {})) > _OUTBOX_LIMIT:
+                raise ValueError("Invalid notification queue length")
+            for item in data.get("outbox", {}).values():
+                if not isinstance(item, dict) or not isinstance(item.get("payload"), dict):
+                    raise ValueError("Invalid local notification")
+            for item in data.get("questions", {}).values():
+                if not isinstance(item, dict) or not isinstance(item.get("asked_at"), (int, float)):
+                    raise ValueError("Invalid local question")
+            self._restored_session = _as_str(data.get("session_id"))
+            item = data.get("pending")
+            if isinstance(item, dict) and isinstance(item.get("text"), str):
+                pending = PendingTask(item["text"], item.get("target_lanlan"))
+                tid = item.get("task_id")
+                pending.task_id = tid if isinstance(tid, int) and not isinstance(tid, bool) and tid > 0 else None
+                pending.awaiting_id = False
+                pending.state = "unknown"
+                pending.created_at = float(item.get("created_at", time.time()))
+                self._pending = pending
+            self._pending_questions = dict(data.get("questions", {}))
+            self._task_directives = {int(k): v for k, v in data.get("directives", {}).items()}
+            self._task_directive_order = deque(self._task_directives)
+            self._task_targets = {int(k): v for k, v in data.get("targets", {}).items()}
+            self._finished_order = deque(data.get("finished", [])[-_SEEN_FRAME_LIMIT:])
+            self._finished_tasks = set(self._finished_order)
+            self._history = deque(data.get("history", [])[-_HISTORY_LIMIT:], maxlen=_HISTORY_LIMIT)
+            self._outbox = dict(data.get("outbox", {}))
+            self._submitted_notifications = deque(
+                data.get("submitted", [])[-_SEEN_FRAME_LIMIT:], maxlen=_SEEN_FRAME_LIMIT,
+            )
+            self._event_gap = bool(data.get("event_gap", False))
+            self._seen_frames_order = deque(tuple(item) for item in data.get("seen_frames", [])[-_SEEN_FRAME_LIMIT:])
+            self._seen_frames = set(self._seen_frames_order)
+            self._progress = {int(k): v for k, v in data.get("progress", {}).items()}
+            self._prune_questions()
+        except FileNotFoundError:
+            return
+        except (OSError, ValueError, TypeError, AttributeError) as exc:
+            self._storage_error = type(exc).__name__
+            self._restore_failed = True
+            self._log_warning("local runtime state unavailable ({})", type(exc).__name__)
+
+    async def _delivery_loop(self) -> None:
+        while True:
+            await asyncio.sleep(2.0)
+            self._retry_notifications()
+            try:
+                await self._persist_runtime()
+            except RuntimeError:
+                self._log_warning("notification checkpoint failed")
 
     # ==================================================================
     # SSE cursor, remembered between runs
@@ -546,6 +723,8 @@ class McbotService:
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
+            return None
+        if not isinstance(raw, dict):
             return None
         session = raw.get("session_id")
         event_id = raw.get("last_event_id")
@@ -573,6 +752,7 @@ class McbotService:
             self._log_warning(
                 "could not remember the SSE cursor: {}", type(exc).__name__
             )
+            raise RuntimeError("SSE cursor could not be saved") from exc
 
     async def _maybe_persist_cursor(self) -> None:
         """Remember the cursor, at most once every few seconds.
@@ -595,8 +775,8 @@ class McbotService:
         if now - self._last_cursor_save_at < _CURSOR_SAVE_INTERVAL_S:
             return
         self._last_cursor_save_at = now
-        self._persisted_cursor = (session, event_id)
         await asyncio.to_thread(self._write_cursor_file, session, event_id)
+        self._persisted_cursor = (session, event_id)
 
     async def _flush_cursor(self) -> None:
         """Write the cursor once more, so a clean stop does not replay."""
@@ -607,8 +787,8 @@ class McbotService:
             return
         if self._persisted_cursor == (session, event_id):
             return
-        self._persisted_cursor = (session, event_id)
         await asyncio.to_thread(self._write_cursor_file, session, event_id)
+        self._persisted_cursor = (session, event_id)
 
     async def _sync_session(self, session: str) -> None:
         """Adopt ``session``, reusing the cursor only where v1.0 allows it.
@@ -621,9 +801,18 @@ class McbotService:
         """
         if not session or session == self._session_id:
             return
+        if session in self._retired_sessions:
+            raise RuntimeError("An event belongs to a retired bridge session")
+        await self._load_runtime()
         client = self._client
         saved = await asyncio.to_thread(self._read_cursor_file)
+        continuing = not self._session_id and self._restored_session == session
+        previous = self._session_id or self._restored_session
+        if previous and previous != session:
+            self._retired_sessions.append(previous)
         if client is not None and saved is not None and saved[0] == session:
+            if not continuing and (self._session_id or self._restored_session):
+                await self._invalidate_session_state()
             self._session_id = session
             client.note_session(session)
             client.restore_cursor(saved[1])
@@ -633,7 +822,8 @@ class McbotService:
                 saved[1],
             )
             return
-        await self._invalidate_session_state()
+        if not continuing:
+            await self._invalidate_session_state()
         self._session_id = session
         if client is not None:
             client.note_session(session)
@@ -655,9 +845,12 @@ class McbotService:
         client = self._client
         if client is None:
             return
+        original_session = self._session_id
         try:
             payload = await client.get_status()
         except McbotBridgeError:
+            return
+        if self._session_id != original_session and payload.get("session_id") != self._session_id:
             return
 
         version = _as_str(payload.get("contract_version"))
@@ -672,10 +865,8 @@ class McbotService:
 
         session = _as_str(payload.get("session_id"))
         client.note_session(session)
-        companion = _as_str(payload.get("companion")).strip()
-        if companion:
-            await self._note_companion(companion)
         await self._sync_session(session)
+        await self._record_status(payload)
 
     async def _invalidate_session_state(self) -> None:
         """Discard everything that belonged to the previous bridge session.
@@ -695,12 +886,62 @@ class McbotService:
                     "reason": "session_changed",
                 }
                 pending.event.set()
+            self._remember_result(pending, "unknown", "", "session_changed")
         if self._pending_questions:
             self._pending_questions.clear()
+        self._task_directives.clear()
+        self._task_directive_order.clear()
+        self._task_targets.clear()
+        self._progress.clear()
+        self._live_status = {}
+        self._status_observed_at = 0.0
+        self._event_gap = False
         self._log_info("bridge session changed; previous session state discarded")
 
+    async def submit(
+        self, text: str, *, overwrite: bool = False, target_lanlan: Optional[str] = None,
+        return_receipt: bool = False,
+    ) -> Any:
+        """Serialize user mutations so a stop cannot overtake an in-flight submission."""
+        async with self._operation_lock:
+            await self._load_runtime()
+            live = await self.probe_status()
+            if not live:
+                return self._plain_error("ERR_UNREACHABLE", "STATUS_UNAVAILABLE")
+            if self._storage_error:
+                return self._plain_error("RUNTIME_UNAVAILABLE", "RUNTIME_UNAVAILABLE")
+            if (live.get("in_game") is False or live.get("brain_enabled") is False
+                    or live.get("body_available") is False or live.get("companion") == ""):
+                return self._plain_error("EXECUTOR_UNAVAILABLE", "EXECUTOR_UNAVAILABLE")
+            if not self._stream_events:
+                return self._plain_error("EVENTS_REQUIRED", "EVENTS_REQUIRED")
+            remote = live.get("current_task")
+            remote_busy = isinstance(remote, int) and not isinstance(remote, bool) and remote > 0
+            queued = live.get("queued_tasks", 0)
+            if self._pending is None and (remote_busy or isinstance(queued, int) and queued > 0):
+                return self._plain_error("REMOTE_BUSY", "REMOTE_BUSY")
+            if self._pending is not None and self._pending.target_lanlan and self._pending.target_lanlan != target_lanlan:
+                return self._plain_error("REMOTE_BUSY", "TASK_OWNER_MISMATCH")
+            pending = await self.try_claim_pending(text, overwrite=overwrite, target_lanlan=target_lanlan)
+            if pending is None:
+                if return_receipt:
+                    return {
+                        "is_error": True, "error": "TASK_BUSY",
+                        "output": {"error": prompts.t("TASK_BUSY_HINT", lang=self._lang, current=self.current_task_text()[:80])},
+                    }
+                return prompts.t("TASK_BUSY_HINT", lang=self._lang, current=self.current_task_text()[:80])
+            error = await self.dispatch_claimed(pending)
+            if error:
+                return error
+            if return_receipt:
+                return {
+                    "summary": prompts.t("TASK_DISPATCHED_ACK", lang=self._lang),
+                    "accepted": True, "task_id": pending.task_id, "goal_satisfied": False,
+                }
+            return prompts.t("TASK_DISPATCHED_ACK", lang=self._lang)
+
     async def try_claim_pending(
-        self, text: str, *, overwrite: Any = False
+        self, text: str, *, overwrite: Any = False, target_lanlan: Optional[str] = None,
     ) -> Optional[PendingTask]:
         """Atomically take the single task slot, or return ``None`` if busy.
 
@@ -711,6 +952,8 @@ class McbotService:
         async with self._pending_lock:
             current = self._pending
             if current is not None:
+                if current.target_lanlan and target_lanlan != current.target_lanlan:
+                    return None
                 if not overwrite_flag:
                     self._log_info("claim refused: task slot busy")
                     return None
@@ -730,7 +973,7 @@ class McbotService:
                     current.result = {"status": "superseded", "query": current.text}
                     current.event.set()
                 self._cancel_watchdog(current)
-            claimed = PendingTask(text)
+            claimed = PendingTask(text, target_lanlan)
             self._pending = claimed
         self._spawn_watchdog(claimed)
         return claimed
@@ -757,12 +1000,7 @@ class McbotService:
         return True
 
     def _spawn_watchdog(self, pending: PendingTask) -> None:
-        """Release the slot if no ``done``/``state`` arrives in time.
-
-        Without this a task whose completion event was lost (bridge restart
-        mid-task, crashed companion) would wedge the slot forever and every
-        later dispatch would report "busy".
-        """
+        """Report an observation timeout without releasing possibly active work."""
         task = asyncio.create_task(
             self._watch_pending(pending), name="mcbot_bridge.watchdog"
         )
@@ -791,9 +1029,8 @@ class McbotService:
         async with self._pending_lock:
             if self._pending is not pending:
                 return
-            self._pending = None
-        pending.result = {"status": "timeout", "query": pending.text}
-        pending.event.set()
+            pending.state = "unknown"
+        pending.result = {"status": "unknown", "query": pending.text, "reason": "observation_timeout"}
         self._log_info("task {} exceeded the wait budget", pending.task_id)
         # The outcome is unknown, not failed: the task may still be running in
         # the game, so the cue says so and nothing is re-dispatched.
@@ -803,7 +1040,9 @@ class McbotService:
             priority=PRIORITY_COMPLETION,
             coalesce_key=self._event_key("timeout", pending.task_id or "unknown"),
             text=pending.text[:200],
+            target_lanlan=pending.target_lanlan,
         )
+        await self._persist_runtime()
 
     async def dispatch_claimed(self, pending: PendingTask) -> Dict[str, Any]:
         """Send a claimed task. Returns ``{}`` on success, an error envelope otherwise.
@@ -820,30 +1059,62 @@ class McbotService:
                 "is_error": True,
                 "error": "BRIDGE_NOT_STARTED",
             }
+        session = self._session_id
+        pending.state = "submitting"
+        try:
+            await self._persist_runtime()
+        except RuntimeError:
+            await self._release(pending)
+            return self._plain_error("RUNTIME_UNAVAILABLE", "RUNTIME_UNAVAILABLE")
         try:
             payload = await client.post_task(pending.text, wait_s=0)
         except McbotBridgeError as exc:
-            await self._release(pending)
+            if isinstance(exc, McbotUnreachable) or exc.status in (400, 401, 413):
+                await self._release(pending)
+            else:
+                pending.state = "unknown"
+                pending.awaiting_id = False
+                pending.buffered.clear()
+            await self._persist_runtime()
+            if pending.state == "unknown":
+                return self._plain_error("SUBMISSION_UNKNOWN", exc.code)
             return self.error_envelope(exc, query=pending.text)
+        except asyncio.CancelledError:
+            pending.state = "unknown"
+            pending.awaiting_id = False
+            await self._persist_runtime()
+            raise
+
+        if session != self._session_id or self._pending is not pending:
+            return self._plain_error("SUBMISSION_UNKNOWN", "SUBMISSION_UNKNOWN")
 
         task_id = payload.get("task_id")
-        if isinstance(task_id, int) and not isinstance(task_id, bool):
-            pending.task_id = task_id
-            self._remember_directive(task_id, pending.text)
+        if not isinstance(task_id, int) or isinstance(task_id, bool) or task_id <= 0:
+            pending.state = "unknown"
+            pending.awaiting_id = False
+            pending.buffered.clear()
+            await self._persist_runtime()
+            return self._plain_error("SUBMISSION_UNKNOWN", "SUBMISSION_UNKNOWN")
+        pending.task_id = task_id
+        pending.state = "running"
+        self._remember_directive(task_id, pending.text)
+        self._task_targets[task_id] = pending.target_lanlan
         # The id is known now, so frames that arrived mid-POST can be
         # attributed. Replay before checking the window result below.
         pending.awaiting_id = False
         buffered, pending.buffered = pending.buffered, []
-        for kind, parked in buffered:
-            if kind == "milestone":
-                self._on_milestone(parked)
+        for parked in buffered:
+            if parked.get("ev") == "question":
+                await self._on_question(parked)
+            elif parked.get("ev") == "progress":
+                await self._on_progress(parked)
             else:
                 await self._apply_done(parked)
         self._log_info("task dispatched (id={})", pending.task_id)
 
         # `done: true` means the task finished inside the response window; with
-        # wait_s=0 that is an instantly-resolved directive and no `done` event
-        # will follow. The contract puts the report in `fragments`, not `text`,
+        # wait_s=0 that can be an instantly-resolved directive. SSE may carry
+        # the same done, so both paths share the terminal deduplication key.
         # and carries `status` whenever done is true.
         if payload.get("done") is True and not pending.event.is_set():
             fragments = payload.get("fragments")
@@ -853,8 +1124,9 @@ class McbotService:
             await self._apply_done({
                 "task_id": pending.task_id,
                 "text": text,
-                "status": _as_str(payload.get("status")).strip() or TASK_STATUS_COMPLETED,
+                "status": _as_str(payload.get("status")).strip() or "unknown",
             })
+        await self._persist_runtime()
         return {}
 
     def _release_lock_free(self, pending: PendingTask) -> None:
@@ -896,6 +1168,8 @@ class McbotService:
         # twice. Marked only after success, so a failed frame is retried.
         seen_key = (self._session_id, event, frame.id) if frame.id else None
         if seen_key is not None and seen_key in self._seen_frames:
+            self._retry_notifications()
+            await self._persist_runtime()
             return
 
         self._last_event_at = time.monotonic()
@@ -913,7 +1187,7 @@ class McbotService:
 
         if seen_key is not None:
             self._remember_frame(seen_key)
-            await self._maybe_persist_cursor()
+        await self._persist_runtime()
 
     def _remember_frame(self, key: tuple) -> None:
         if len(self._seen_frames_order) >= _SEEN_FRAME_LIMIT:
@@ -926,12 +1200,21 @@ class McbotService:
 
 
     async def _on_progress(self, payload: Dict[str, Any]) -> None:
-        # Key nodes are a separate, reliable notification: a progress frame may
-        # carry an optional `milestone` object that must not be drowned out by
-        # ordinary narration. Park it before the POST returns; otherwise emit
-        # one respond cue, deduplicated by session/task/node id.
-        if isinstance(payload.get("milestone"), dict) and self._on_milestone(payload):
+        task_id = payload.get("task_id")
+        if "milestone" in payload:
+            await self._on_milestone(payload)
             return
+        if isinstance(task_id, int) and not isinstance(task_id, bool) and task_id > 0:
+            milestones = self._progress.get(task_id, {}).get("milestones", [])
+            self._progress[task_id] = {
+                "text": _as_str(payload.get("text"))[:DONE_TEXT_LIMIT],
+                "tool": _as_str(payload.get("tool")),
+                "ok": payload.get("ok") if isinstance(payload.get("ok"), bool) else None,
+                "observed_at": time.time(),
+                "milestones": milestones,
+            }
+            while len(self._progress) > _SEEN_FRAME_LIMIT:
+                self._progress.pop(next(iter(self._progress)))
         text = _as_str(payload.get("text")).strip()
         if not text:
             return
@@ -948,6 +1231,7 @@ class McbotService:
                 ai_behavior="read",
                 priority=PRIORITY_PROGRESS,
                 coalesce_key="mcbot_progress",
+                target_lanlan=self._task_targets.get(task_id),
                 text=text[:400],
             )
             return
@@ -958,9 +1242,59 @@ class McbotService:
             ai_behavior="blind",
             priority=PRIORITY_PROGRESS,
             coalesce_key="mcbot_progress",
+            target_lanlan=self._task_targets.get(task_id),
             visibility=["hud"] if tool and payload.get("ok") is True else [],
             text=text[:400],
         )
+
+    async def _on_milestone(self, payload: Dict[str, Any]) -> None:
+        task_id = payload.get("task_id")
+        report = payload.get("milestone")
+        if (not isinstance(task_id, int) or isinstance(task_id, bool) or task_id <= 0
+                or not isinstance(report, dict) or report.get("verified") is not True
+                or report.get("kind") not in ("item", "position", "building")):
+            return
+        ident, facts = report.get("id"), report.get("facts")
+        if (not isinstance(ident, str) or len(ident) != 64
+                or any(char not in "0123456789abcdef" for char in ident)
+                or not isinstance(facts, str) or not facts.strip()
+                or len(facts) > DONE_TEXT_LIMIT or not isinstance(report.get("evidence"), dict)):
+            return
+        pending = self._pending
+        if pending is not None and pending.awaiting_id:
+            if len(pending.buffered) >= _MAX_BUFFERED_EVENTS:
+                raise RuntimeError("Submission event buffer full")
+            pending.buffered.append({**payload, "ev": "progress"})
+            return
+        # Only tasks attributed to this character may open a speaking turn.
+        # A gameplay task or another caller's early event has no known recipient.
+        if task_id not in self._task_directives or self._event_key("done", task_id) in self._finished_tasks:
+            return
+        progress = self._progress.get(task_id, {})
+        milestones = progress.get("milestones", [])
+        if ident in milestones:
+            self._retry_notifications()
+            return
+        if len(milestones) >= 1024:
+            raise RuntimeError("Milestone receipt ledger full; leave event unacknowledged")
+        submitted = self._push_cue(
+            "CUE_MILESTONE", ai_behavior="respond", priority=PRIORITY_COMPLETION,
+            coalesce_key=self._event_key("milestone", f"{task_id}/{ident}"),
+            target_lanlan=self._task_targets.get(task_id),
+            notification_task_id=task_id,
+            directive=self._clip_done_text(self._task_directives[task_id]),
+            text=facts,
+        )
+        self._log_info(
+            "milestone task={} id={} delivery={}", task_id, ident[:12],
+            "submitted" if submitted else "queued",
+        )
+        # _push_cue either reserves a retryable notice or raises. A rejected SDK
+        # submission must not lose the achievement or release the running task.
+        self._progress[task_id] = {
+            **progress, "text": facts, "observed_at": time.time(),
+            "milestones": [*milestones, ident],
+        }
 
     async def _on_done(self, payload: Dict[str, Any]) -> None:
         pending = self._pending
@@ -969,61 +1303,11 @@ class McbotService:
             # done can beat the POST response, and until we know our task id we
             # cannot tell it apart from another task's.
             if len(pending.buffered) < _MAX_BUFFERED_EVENTS:
-                pending.buffered.append(("done", payload))
+                pending.buffered.append(payload)
+            else:
+                raise RuntimeError("Submission event buffer full")
             return
         await self._apply_done(payload)
-
-    def _on_milestone(self, payload: Dict[str, Any]) -> bool:
-        """Deliver one verified key node, or park it until the task id is known.
-
-        Returns True when the payload was consumed (delivered or parked), so
-        the ordinary progress path does not also narrate it. A malformed or
-        unverified milestone returns False and stays ordinary progress.
-        """
-        milestone = payload.get("milestone")
-        if not isinstance(milestone, dict):
-            return False
-        milestone_id = _as_str(milestone.get("id")).strip()
-        if not milestone_id or len(milestone_id) > 128:
-            return False
-        if milestone.get("verified") is not True:
-            return False
-        task_id = payload.get("task_id")
-        if not isinstance(task_id, int) or isinstance(task_id, bool) or task_id <= 0:
-            return False
-        key = (self._session_id, task_id, milestone_id)
-        if key in self._seen_milestones:
-            return True
-        pending = self._pending
-        if pending is not None and pending.awaiting_id:
-            if len(pending.buffered) < _MAX_BUFFERED_EVENTS:
-                pending.buffered.append(("milestone", payload))
-            else:
-                self._log_warning(
-                    "milestone buffer full; dropping task={} id={}",
-                    task_id, milestone_id,
-                )
-            return True
-        text = _as_str(milestone.get("facts")).strip() or _as_str(payload.get("text")).strip()
-        if not text:
-            return False
-        self._remember_milestone(key)
-        self._push_cue(
-            "CUE_MILESTONE",
-            ai_behavior="respond",
-            priority=PRIORITY_MILESTONE,
-            coalesce_key=self._event_key("milestone", f"{task_id}/{milestone_id}"),
-            text=text[:DONE_TEXT_LIMIT],
-        )
-        return True
-
-    def _remember_milestone(self, key: tuple) -> None:
-        if key in self._seen_milestones:
-            return
-        if len(self._seen_milestone_order) >= _SEEN_FRAME_LIMIT:
-            self._seen_milestones.discard(self._seen_milestone_order.popleft())
-        self._seen_milestone_order.append(key)
-        self._seen_milestones.add(key)
 
     def _remember_directive(self, task_id: int, text: str) -> None:
         """Remember what we asked for, so a done can be framed by it.
@@ -1036,7 +1320,10 @@ class McbotService:
         self._task_directives[task_id] = text
         self._task_directive_order.append(task_id)
         while len(self._task_directive_order) > _SEEN_FRAME_LIMIT:
-            self._task_directives.pop(self._task_directive_order.popleft(), None)
+            oldest = self._task_directive_order.popleft()
+            self._task_directives.pop(oldest, None)
+            self._task_targets.pop(oldest, None)
+            self._progress.pop(oldest, None)
 
     def _command_by_task(self, task_id: Any, text: str = "") -> str:
         """The command word when this task was a command rather than work.
@@ -1064,73 +1351,80 @@ class McbotService:
         return text[:DONE_TEXT_LIMIT] + prompts.t("DONE_TEXT_TRUNCATED", lang=self._lang)
 
     async def _apply_done(self, payload: Dict[str, Any]) -> None:
-        """Release the matching slot and narrate the outcome.
-
-        ``status`` decides the framing. v1.0 can report completed / failed /
-        cancelled / superseded, and only the first is success — presenting a
-        failure or a cancellation as "done" is the same defect the sibling
-        plugin documents for mc-agent.
-        """
+        """Settle transport state; a normal answer alone never proves goal success."""
         task_id = payload.get("task_id")
+        if not isinstance(task_id, int) or isinstance(task_id, bool) or task_id <= 0:
+            return
         text = _as_str(payload.get("text")).strip()
-        status = _as_str(payload.get("status")).strip().lower() or TASK_STATUS_COMPLETED
+        status = _as_str(payload.get("status")).strip().lower() or "unknown"
+        if status not in TASK_STATUSES_TERMINAL:
+            status = "unknown"
+        finished_key = self._event_key("done", task_id)
+        if finished_key in self._finished_tasks:
+            return
 
-        finished_key = None
-        if isinstance(task_id, int) and not isinstance(task_id, bool):
-            finished_key = self._event_key("done", task_id)
-            if finished_key in self._finished_tasks:
-                return
+        pending = self._pending
+        command = self._command_by_task(task_id, text) if status == TASK_STATUS_COMPLETED else ""
+        if status not in TASK_STATUSES_SILENT and text:
+            key = (
+                "CUE_COMMAND_RECEIPT" if command else
+                "CUE_DONE" if status == TASK_STATUS_COMPLETED else
+                "CUE_RESULT_UNKNOWN" if status == "unknown" else "CUE_DONE_FAILED"
+            )
+            report = self._clip_done_text(text)
+            directive = self._task_directives.get(task_id, "")
+            if directive:
+                report = prompts.t(
+                    "RESULT_CONTEXT", lang=self._lang,
+                    directive=self._clip_done_text(directive), text=report,
+                )
+            # Reserve a retryable notification before recording this terminal as consumed.
+            self._push_cue(
+                key, ai_behavior="respond", priority=PRIORITY_COMPLETION,
+                coalesce_key=finished_key if status != "unknown" else finished_key + ":unknown",
+                text=report,
+                status=status, command=command,
+                target_lanlan=self._task_targets.get(task_id),
+                notification_task_id=task_id,
+            )
+        if status != "unknown":
             self._finished_tasks.add(finished_key)
             self._finished_order.append(finished_key)
             if len(self._finished_order) > _SEEN_FRAME_LIMIT:
                 self._finished_tasks.discard(self._finished_order.popleft())
-
-        pending = self._pending
         if pending is not None:
-            ours = pending.task_id is None or (
-                isinstance(task_id, int)
-                and not isinstance(task_id, bool)
-                and task_id == pending.task_id
-            )
+            ours = pending.task_id == task_id
             if ours:
-                await self._resolve_pending(pending, text, status=status)
-            # else: another (e.g. in-game `@bot`-driven) task finished — our
-            # slot stays claimed, but the outcome is still worth narrating.
-
-        if isinstance(task_id, int) and not isinstance(task_id, bool):
+                if status == "unknown":
+                    pending.state = "unknown"
+                else:
+                    await self._resolve_pending(pending, text, status=status)
+        if self._live_status.get("current_task") == task_id and status != "unknown":
+            self._live_status.pop("current_task", None)
+        if status != "unknown":
             self._prune_questions(task_id)
+        if pending is None or pending.task_id != task_id:
+            self._history.append({
+                "session_id": self._session_id, "task_id": task_id,
+                "status": status, "text": self._clip_done_text(text), "observed_at": time.time(),
+                "target_lanlan": self._task_targets.get(task_id),
+            })
 
-        if status in TASK_STATUSES_SILENT:
-            # Replaced or stopped on purpose; the LLM caused it and knows.
-            # Cue'ing it invites a re-dispatch of work already abandoned.
-            return
-        if not text:
-            return
-        # A command directive reports `completed` when it is merely *accepted*
-        # (`BRIDGE.md`): 恢复目标 then runs under a new task id, and 目标状态
-        # does no work. Construction resume words are commands only when the
-        # done text carries the resume marker; the helper decides that.
-        command = self._command_by_task(task_id, text) if status == TASK_STATUS_COMPLETED else ""
-        key = (
-            "CUE_COMMAND_RECEIPT"
-            if command
-            else "CUE_DONE" if status == TASK_STATUS_COMPLETED else "CUE_DONE_FAILED"
-        )
-        self._push_cue(
-            key,
-            ai_behavior="respond",
-            priority=PRIORITY_COMPLETION,
-            coalesce_key=self._event_key("done", task_id if finished_key else "unknown"),
-            text=self._clip_done_text(text),
-            status=status,
-            command=command,
-        )
+    def _remember_result(
+        self, pending: PendingTask, status: str, text: str, reason: str = "",
+    ) -> None:
+        self._history.append({
+            "session_id": self._session_id or self._restored_session, "task_id": pending.task_id,
+            "directive": pending.text, "status": status, "text": self._clip_done_text(text),
+            "reason": reason, "observed_at": time.time(), "target_lanlan": pending.target_lanlan,
+        })
 
     async def _resolve_pending(
         self, pending: PendingTask, text: str, *, status: str = TASK_STATUS_COMPLETED
     ) -> None:
         async with self._pending_lock:
             self._release_lock_free(pending)
+        self._remember_result(pending, status, text)
         if not pending.event.is_set():
             pending.result = {
                 "status": status,
@@ -1141,6 +1435,12 @@ class McbotService:
             pending.event.set()
 
     async def _on_question(self, payload: Dict[str, Any]) -> None:
+        pending = self._pending
+        if pending is not None and pending.awaiting_id:
+            if len(pending.buffered) >= _MAX_BUFFERED_EVENTS:
+                raise RuntimeError("Submission event buffer full")
+            pending.buffered.append({**payload, "ev": "question"})
+            return
         question_id = _as_str(payload.get("question_id")).strip()
         text = _as_str(payload.get("text")).strip()
         if not question_id or not text:
@@ -1156,6 +1456,7 @@ class McbotService:
             "text": text,
             "task_id": payload.get("task_id"),
             "asked_at": time.time(),
+            "target_lanlan": self._task_targets.get(payload.get("task_id")),
         }
         # Never truncated: an authorisation question must reach the owner in
         # full, or the owner approves a narrower scope than the bridge grants.
@@ -1167,6 +1468,9 @@ class McbotService:
             ai_behavior="respond",
             priority=PRIORITY_QUESTION,
             coalesce_key=self._event_key("question", question_id),
+            target_lanlan=self._task_targets.get(payload.get("task_id")),
+            expires_at=self._pending_questions[question_id]["asked_at"] + QUESTION_TTL_S,
+            question_id=question_id,
             text=text,
             auth_note=(
                 prompts.t("CUE_QUESTION_AUTH_NOTE", lang=self._lang)
@@ -1183,6 +1487,9 @@ class McbotService:
                 task_id is not None and item["task_id"] == task_id
             ):
                 del self._pending_questions[qid]
+                for key, notice in tuple(self._outbox.items()):
+                    if notice.get("question_id") == qid:
+                        self._outbox.pop(key, None)
 
     def has_open_question(self) -> bool:
         """True while at least one reverse question is still inside its window.
@@ -1194,6 +1501,11 @@ class McbotService:
         return bool(self._pending_questions)
 
     async def _on_state(self, payload: Dict[str, Any]) -> None:
+        task_id = payload.get("task_id")
+        status = _as_str(payload.get("status"))
+        if isinstance(task_id, int) and not isinstance(task_id, bool) and task_id > 0 and status in ("running", "parked"):
+            self._live_status["current_task"] = task_id
+            self._live_status["parked"] = status == "parked" or payload.get("parked") is True
         text = _as_str(payload.get("text")).strip()
         if not text:
             return
@@ -1252,29 +1564,31 @@ class McbotService:
     # Outbound tool support
     # ==================================================================
 
-    async def ask(self, text: str) -> Dict[str, Any]:
-        """Ask the companion a question directly (synchronous, slow)."""
-        client = self._client
-        if client is None:
-            return {
-                "output": {"error": prompts.t("ERR_UNREACHABLE", lang=self._lang)},
-                "is_error": True,
-                "error": "BRIDGE_NOT_STARTED",
-            }
-        try:
-            payload = await client.ask(text)
-        except McbotBridgeError as exc:
-            return self.error_envelope(exc, query=text)
-        answer = _as_str(payload.get("answer")).strip()
-        if not answer:
-            return prompts.t("ASK_NO_ANSWER", lang=self._lang)
-        return prompts.t("ASK_ANSWER", lang=self._lang, answer=answer)
+    async def ask(self, text: str, *, target_lanlan: Optional[str] = None) -> Dict[str, Any]:
+        """Observe only: /v1/ask creates work and can supersede a parked task."""
+        await self.probe_status()
+        snapshot = self.get_status(target_lanlan=target_lanlan)
+        return {
+            "output": {
+                "summary": prompts.t("OBSERVATION_ONLY", lang=self._lang),
+                "question": text,
+                "observation": {
+                    key: snapshot[key] for key in (
+                        "connected", "executor", "status_age_seconds", "pending_task",
+                        "pending_task_id", "task_state", "latest_progress", "pending_question_items",
+                        "recent_results", "event_gap", "notifications_pending",
+                    )
+                },
+            },
+        }
 
-    async def answer(self, question_id: str, text: str) -> Dict[str, Any]:
+    async def answer(
+        self, question_id: str, text: str, *, target_lanlan: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """Relay an answer to a reverse question the companion asked.
 
-        An explicit ``question_id`` is forwarded as given: the bridge is the
-        authority on whether it is still open. Without one, the answer binds to
+        An explicit ``question_id`` must still belong to this session's cache;
+        the bridge then verifies that it remains open. Without one, the answer binds to
         the only cached question still inside its window — never to the newest
         of several, which could be the wrong one.
         """
@@ -1287,12 +1601,20 @@ class McbotService:
             }
         self._prune_questions()
         qid = _as_str(question_id).strip()
+        eligible = {
+            q: item for q, item in self._pending_questions.items()
+            if not item.get("target_lanlan") or item.get("target_lanlan") == target_lanlan
+        }
         if not qid:
-            if not self._pending_questions:
+            if not eligible:
                 return self._plain_error("ANSWER_NO_OPEN_QUESTION", "NO_OPEN_QUESTION")
-            if len(self._pending_questions) > 1:
+            if len(eligible) > 1:
                 return self._plain_error("ANSWER_AMBIGUOUS_QUESTION", "AMBIGUOUS_QUESTION")
-            qid = next(iter(self._pending_questions))
+            qid = next(iter(eligible))
+        if qid in self._pending_questions and qid not in eligible:
+            return self._plain_error("ANSWER_NO_OPEN_QUESTION", "QUESTION_OWNER_MISMATCH")
+        if qid not in eligible:
+            return self._plain_error("ANSWER_UNKNOWN_QUESTION", "QUESTION_EXPIRED")
         try:
             await client.answer(qid, text)
         except McbotBridgeError as exc:
@@ -1301,6 +1623,10 @@ class McbotService:
                 return self._plain_error("ANSWER_UNKNOWN_QUESTION", "QUESTION_EXPIRED")
             return self.error_envelope(exc, query=qid)
         self._pending_questions.pop(qid, None)
+        for key, notice in tuple(self._outbox.items()):
+            if notice.get("question_id") == qid:
+                self._outbox.pop(key, None)
+        await self._persist_runtime()
         return prompts.t("ANSWER_OK", lang=self._lang)
 
     def _plain_error(self, key: str, code: str) -> Dict[str, Any]:
@@ -1310,7 +1636,13 @@ class McbotService:
             "error": code,
         }
 
-    async def cancel(self, task_id: Optional[int] = None) -> Dict[str, Any]:
+    async def cancel(
+        self, task_id: Optional[int] = None, *, target_lanlan: Optional[str] = None,
+    ) -> Any:
+        async with self._operation_lock:
+            return await self._cancel(task_id, target_lanlan=target_lanlan)
+
+    async def _cancel(self, task_id: Optional[int], *, target_lanlan: Optional[str]) -> Any:
         """Cancel one task by id, or everything when ``task_id`` is None or 0.
 
         Only the local slot whose id matches is cleared: cancelling a task the
@@ -1318,8 +1650,9 @@ class McbotService:
         running.
         """
         cancel_all = not task_id
-        if self._pending is None and cancel_all:
-            return prompts.t("CANCEL_NOTHING", lang=self._lang)
+        before = self._pending
+        if before is not None and before.target_lanlan and before.target_lanlan != target_lanlan:
+            return self._plain_error("REMOTE_BUSY", "TASK_OWNER_MISMATCH")
         client = self._client
         if client is None:
             return {
@@ -1327,16 +1660,23 @@ class McbotService:
                 "is_error": True,
                 "error": "BRIDGE_NOT_STARTED",
             }
+        session = self._session_id
         try:
             payload = await client.cancel_task(None if cancel_all else task_id)
         except McbotBridgeError as exc:
             return self.error_envelope(exc, query=str(task_id or ""))
+        if session != self._session_id or client is not self._client:
+            return self._plain_error("SUBMISSION_UNKNOWN", "CANCEL_SESSION_CHANGED")
         if payload.get("ok") is not True:
             return prompts.t("CANCEL_REFUSED", lang=self._lang)
         pending = self._pending
         if pending is not None and (cancel_all or pending.task_id == task_id):
             await self._resolve_pending(pending, "", status="cancelled")
+        # Cancel-all is an explicit user action even if the plugin forgot its local slot.
+        if cancel_all or self._live_status.get("current_task") == task_id:
+            self._live_status.pop("current_task", None)
         self._prune_questions(None if cancel_all else task_id, all_tasks=cancel_all)
+        await self._persist_runtime()
         return prompts.t("CANCEL_OK", lang=self._lang)
 
     # ==================================================================
@@ -1360,24 +1700,58 @@ class McbotService:
         client = self._client
         if client is None:
             return {}
+        original_session = self._session_id
         try:
             payload = await client.get_status()
         except McbotBridgeError as exc:
             self._last_stream_error = exc.code
             return {}
-        companion = _as_str(payload.get("companion")).strip()
-        if companion:
-            await self._note_companion(companion)
+        if self._session_id != original_session and payload.get("session_id") != self._session_id:
+            return {}
+        await self._sync_session(_as_str(payload.get("session_id")))
+        await self._record_status(payload)
         return payload
+
+    async def _record_status(self, payload: Dict[str, Any]) -> None:
+        self._live_status = {
+            key: payload[key] for key in (
+                "in_game", "brain_enabled", "body_available", "body_id", "current_task",
+                "queued_tasks", "pending_jobs", "pending_tools", "pending_questions", "parked",
+            ) if key in payload
+        }
+        self._status_observed_at = time.time()
+        if "companion" in payload:
+            name = _as_str(payload.get("companion")).strip()
+            if name:
+                await self._note_companion(name)
+            else:
+                self._companion = ""
+
+    async def mark_event_gap(self) -> None:
+        self._event_gap = True
+        if self._pending is not None:
+            self._pending.state = "unknown"
+        await self._persist_runtime()
 
     @property
     def companion(self) -> str:
         return self._companion
 
-    def get_status(self) -> Dict[str, Any]:
+    def get_status(self, *, target_lanlan: Optional[str] = None) -> Dict[str, Any]:
         """Local snapshot for the status entry — never performs I/O."""
         pending = self._pending
+        if pending is not None and pending.target_lanlan and target_lanlan != pending.target_lanlan:
+            pending = None
+        self._prune_questions()
         client = self._client
+        questions = {
+            q: item for q, item in self._pending_questions.items()
+            if not item.get("target_lanlan") or item.get("target_lanlan") == target_lanlan
+        }
+        task_id = pending.task_id if pending is not None else self._live_status.get("current_task")
+        owner = self._task_targets.get(task_id)
+        if owner and owner != target_lanlan:
+            task_id = None
         return {
             "connected": self.is_connected(),
             "companion": self._companion,
@@ -1393,10 +1767,26 @@ class McbotService:
             ) or self._last_stream_error,
             "pending_task": pending.text if pending is not None else "",
             "pending_task_id": pending.task_id if pending is not None else None,
-            "pending_questions": len(self._pending_questions),
+            "task_state": pending.state if pending is not None else (
+                "running" if self._live_status.get("current_task") else
+                "idle" if self._live_status.get("current_task") == 0
+                and self._live_status.get("queued_tasks") == 0 else "unknown"
+            ),
+            "executor": dict(self._live_status),
+            "status_age_seconds": round(time.time() - self._status_observed_at, 1) if self._status_observed_at else None,
+            "latest_progress": dict(self._progress.get(task_id, {})),
+            "recent_results": [
+                dict(item) for item in self._history
+                if not item.get("target_lanlan") or item.get("target_lanlan") == target_lanlan
+            ],
+            "notifications_pending": len(self._outbox),
+            "notifications_blocked": sum(item.get("blocked") is True for item in self._outbox.values()),
+            "event_gap": self._event_gap,
+            "storage_error": self._storage_error,
+            "pending_questions": len(questions),
             "pending_question_items": [
                 {"id": qid, "text": item.get("text", "")}
-                for qid, item in self._pending_questions.items()
+                for qid, item in questions.items()
             ],
             "last_event_age_seconds": (
                 round(time.monotonic() - self._last_event_at, 1)
@@ -1417,9 +1807,13 @@ class McbotService:
         priority: int,
         coalesce_key: str,
         visibility: Optional[list[str]] = None,
+        target_lanlan: Optional[str] = None,
+        expires_at: Optional[float] = None,
+        question_id: Optional[str] = None,
+        notification_task_id: Optional[int] = None,
         **fmt: Any,
-    ) -> None:
-        """Format and push one cue. Never raises into the caller.
+    ) -> bool:
+        """Reserve important notifications before trying the SDK's submission path.
 
         ``visibility=[]`` means the user does not see the cue parts themselves:
         the dialog LLM absorbs them and, for ``respond`` cues, voices the
@@ -1441,37 +1835,91 @@ class McbotService:
             )
         except Exception as exc:
             self._log_warning("cue {} could not be formatted: {}", key, type(exc).__name__)
-            return
+            raise RuntimeError("Notification could not be formatted") from exc
         if not text:
-            return
+            return False
+        payload = {
+            "source": "mcbot_bridge",
+            "visibility": list(visibility or []),
+            "ai_behavior": ai_behavior,
+            "parts": [{"type": "text", "text": text}],
+            "priority": priority,
+            "coalesce_key": coalesce_key,
+        }
+        if target_lanlan:
+            payload["target_lanlan"] = target_lanlan
+        reliable = ai_behavior == "respond"
+        if reliable:
+            if coalesce_key in self._submitted_notifications:
+                return True
+            if coalesce_key not in self._outbox:
+                if len(self._outbox) >= _OUTBOX_LIMIT:
+                    raise RuntimeError("Notification queue full; leave the source event unacknowledged")
+                self._outbox[coalesce_key] = {
+                    "payload": payload, "expires_at": expires_at, "question_id": question_id,
+                    "session_id": self._session_id,
+                    "task_id": notification_task_id,
+                }
+            payload = self._outbox[coalesce_key]["payload"]
+            if notification_task_id is not None:
+                for earlier_key, earlier in self._outbox.items():
+                    if earlier_key == coalesce_key:
+                        break
+                    if (earlier.get("task_id") == notification_task_id
+                            and earlier.get("session_id") == self._session_id):
+                        return False
+        accepted = self._submit_notification(payload)
+        if reliable and self._notification_error == "payload_too_large":
+            self._outbox[coalesce_key]["blocked"] = True
+        if reliable and accepted:
+            self._outbox.pop(coalesce_key, None)
+            self._submitted_notifications.append(coalesce_key)
+        return accepted
+
+    def _submit_notification(self, payload: Dict[str, Any]) -> bool:
+        self._notification_error = ""
         try:
-            self._push_message(
-                source="mcbot_bridge",
-                visibility=list(visibility or []),
-                ai_behavior=ai_behavior,
-                parts=[{"type": "text", "text": text}],
-                priority=priority,
-                coalesce_key=coalesce_key,
-            )
+            result = self._push_message(**payload)
         except Exception as exc:
-            # Delivery is best-effort; a failure here must not corrupt the
-            # event pipeline that called us.
-            self._log_warning("cue {} push failed: {}", key, type(exc).__name__)
-            return
-        # Logged on success too: without this the only evidence that a cue left
-        # the plugin lives in the host's log, which makes any "the character
-        # never mentioned it" report impossible to diagnose from this side.
-        # Key/behaviour/size only — the body is conversational content and is
-        # never written to the log.
-        #
-        # INFO, not DEBUG: the first run of this line was written at debug and
-        # was therefore invisible at the default level during a real test, which
-        # defeats its purpose. The volume is bounded by the same throttles that
-        # bound the cues themselves, so it is affordable.
-        self._log_info(
-            "cue {} pushed ({} prio={} {} chars)",
-            key, ai_behavior, priority, len(text),
-        )
+            self._log_warning("notification submission raised ({})", type(exc).__name__)
+            return False
+        accepted = isinstance(result, dict) and result.get("submitted") is True
+        if not accepted:
+            self._notification_error = result.get("reason", "no_receipt") if isinstance(result, dict) else "no_receipt"
+            self._log_warning("notification not accepted by the local SDK")
+        return accepted
+
+    def _retry_notifications(self) -> None:
+        self._prune_questions()
+        waiting_tasks = set()
+        for key, item in tuple(self._outbox.items()):
+            if item.get("question_id") and (
+                (self._session_id and item.get("session_id") != self._session_id)
+                or item["question_id"] not in self._pending_questions
+                or (item.get("expires_at") or 0) <= time.time()
+            ):
+                self._outbox.pop(key, None)
+                continue
+            if item.get("question_id") and not self._session_id:
+                continue
+            group = (item.get("session_id"), item.get("task_id")) if item.get("task_id") is not None else None
+            if group is not None and group in waiting_tasks:
+                continue
+            if item.get("blocked"):
+                if group is not None:
+                    waiting_tasks.add(group)
+                continue
+            if self._submit_notification(item["payload"]):
+                self._outbox.pop(key, None)
+                self._submitted_notifications.append(key)
+                if key.startswith("mcbot_milestone:"):
+                    self._log_info("milestone retry submitted task={}", item.get("task_id"))
+            elif self._notification_error == "payload_too_large":
+                item["blocked"] = True
+                if group is not None:
+                    waiting_tasks.add(group)
+            elif group is not None:
+                waiting_tasks.add(group)
 
     def error_envelope(self, exc: McbotBridgeError, *, query: str = "") -> Dict[str, Any]:
         """Translate a bridge failure into a model-facing error envelope.

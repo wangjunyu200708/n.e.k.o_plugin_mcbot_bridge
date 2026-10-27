@@ -6,23 +6,18 @@ loopback REST + SSE bridge on ``127.0.0.1:17897``.
 
 Where the actions live, and why:
 
-* :func:`mcbot_task`, :func:`mcbot_ask`, :func:`mcbot_answer`,
-  :func:`mcbot_cancel` are ``@llm_tool`` — the *dialog* LLM calls them
-  directly, because "go chop some wood" has to be decided by whichever model is
-  actually mid-conversation, and the tool needs the model's own typed arguments
-  and a synchronous answer.
-* :func:`mcbot_status` and :func:`mcbot_reload_config` are ``@plugin_entry`` —
-  these are facts and settings, which the *analyzer* asks for and the plugin
-  panel can call. They are deliberately not LLM tools: dispatching a status
-  query as if it were an action is the canonical way to make an agent loop
-  against itself, and a fact query does not deserve a slot in the dialog
-  model's tool list.
+* :func:`mcbot_task` is a normal ``@plugin_entry``. The host analyzer can
+  discover it and dispatch the owner's request, including on dialog models
+  that never call tools. New work has one dispatch surface so the dialog and
+  analyzer cannot race to repeat the same short task.
+* :func:`mcbot_ask`, :func:`mcbot_answer`, :func:`mcbot_cancel` are
+  ``@llm_tool`` methods for observing progress, relaying an answer and stopping
+  work. Manager entries expose status, configuration and stop to the panel.
 
 The two audiences are mutually exclusive by construction: ``@plugin_entry``
 never reaches main_server's tool registry (only ``LLM_TOOL_REGISTER``, sent for
 ``@llm_tool``, does), and the analyzer's plugin view has every ``__llm_tool__``
--prefixed entry stripped out (``app/agent_server/api_runtime.py``). This is the
-same split the sibling ``game_agent_minecraft`` plugin uses.
+-prefixed entry stripped out (``app/agent_server/api_runtime.py``).
 
 The third channel is the reverse one: the bridge's SSE stream is translated
 into ``push_message`` cues, so the character can react to her companion's
@@ -84,27 +79,14 @@ MCBOT_TASK_SCHEMA: Dict[str, Any] = {
 }
 
 MCBOT_TASK_DESCRIPTION = (
-    "Send one instruction to your in-game companion and return immediately "
-    "with an acknowledgement. Fire-and-forget: the outcome arrives on its own "
-    "as progress and completion cues, so never state or guess a result from "
-    "this call alone.\n\n"
-    "This tool dispatches actions; it is not an awareness or status source. A "
-    "progress line, a completion cue, or a question from the companion is "
-    "context to react to — never itself something to dispatch. Before "
-    "dispatching, account for what the companion may already be doing; if her "
-    "last instruction may still be running, do not send another.\n\n"
-    "Use it when the user asks the companion to do something new that has not "
-    "already been sent. Do NOT use it for questions about her state or what "
-    "she is carrying, and do not re-send an earlier instruction merely because "
-    "a cue arrived. When the user asks the companion to go and ask the owner "
-    "(ask_owner) something, that is a task: pass it on verbatim, and do not "
-    "use mcbot_ask for it. If one of her questions is still open and the "
-    "user's words answer it, that is mcbot_answer — not this tool.\n\n"
-    "Parameters:\n"
-    "  text (string, required): the instruction, in the user's own wording "
-    "when they gave one.\n"
-    "  overwrite (bool, default false): true only to interrupt the current "
-    "task; see the schema description for when that is warranted."
+    "派发用户明确要求的 Minecraft 游戏任务：移动、跟随护卫、采集挖矿、制作、建筑等"
+    "均将用户原话放入text，由游戏里的大脑规划执行，不需要每种行为单独入口。"
+    "猫娘是执行角色，bot是她的游戏身体。只派发一次，立即返回实际受理编号；"
+    "受理不是完成，关键节点和最终成果会主动推送，不能按入口成功宣称游戏目标完成。"
+    "已有任务运行时默认保留，不重派；overwrite仅在用户明确要求改派或打断时true。"
+    "查询进度选mcbot_status，停止选mcbot_stop，配置重载选mcbot_reload_config；"
+    "进度、结果、反问及用户对反问的回答不是新任务，不能因这些通知重新派活。"
+    "text使用最新用户原话，不翻译、不拆分或添加步骤、数量、坐标；不要传工具名。"
 )
 
 MCBOT_ASK_SCHEMA: Dict[str, Any] = {
@@ -119,10 +101,11 @@ MCBOT_ASK_SCHEMA: Dict[str, Any] = {
 }
 
 MCBOT_ASK_DESCRIPTION = (
-    "Call this when the owner asks you a question about the game. It asks the "
-    "in-game executor and brings the game state back to you, so answer the "
-    "owner from what it returns, in your own voice. It blocks until an answer "
-    "comes back; if the companion is mid-task she may not answer."
+    "Read current execution status and the latest observed progress without "
+    "starting, interrupting or replacing a game task. Use this for 'how is it "
+    "going?'. The returned timestamps matter: old receipts are observations, "
+    "not current inventory or goal verification. If a requested fact is absent, "
+    "say it is unknown. Never resend work to obtain a status update."
 )
 
 MCBOT_ANSWER_SCHEMA: Dict[str, Any] = {
@@ -153,7 +136,7 @@ MCBOT_ANSWER_DESCRIPTION = (
     "An answer often sounds like a fresh instruction: to a question about "
     "whether to fight or scout, 'let's scout first' is the answer, not a new "
     "task. When you have relayed one of her questions and the user's next "
-    "words answer it, call this — not mcbot_task."
+    "words answer it, call this instead of starting new work."
 )
 
 MCBOT_CANCEL_SCHEMA: Dict[str, Any] = {
@@ -171,10 +154,19 @@ MCBOT_CANCEL_SCHEMA: Dict[str, Any] = {
 
 MCBOT_CANCEL_DESCRIPTION = (
     "Tell the companion to stop what she is doing. Use it when the user says "
-    "to stop or abort. To redirect her to a different action instead, call "
-    "mcbot_task with overwrite=true — that both stops the current task and "
-    "starts the new one."
+    "to stop or abort. New or redirected game work is dispatched through the "
+    "host analyzer's mcbot_task entry, not by this stop tool."
 )
+
+def _recipient(plugin: Any) -> str | None:
+    # The SDK facade wraps the host context; invocation identity lives on the
+    # original context as a ContextVar, rather than in model-supplied arguments.
+    context = getattr(plugin, "_host_ctx", None) or getattr(plugin, "ctx", None)
+    value = getattr(context, "current_lanlan", None)
+    return value if isinstance(value, str) and value else None
+
+
+CONTROL_ENTRY_METADATA = {"result_kind": "event"}
 
 
 @neko_plugin
@@ -289,28 +281,33 @@ class McbotBridgePlugin(NekoPluginBase):
             )
 
     # ------------------------------------------------------------------
-    # @llm_tool — the dialog LLM's direct surface
+    # Task dispatch belongs to the analyzer; dialog tools never start new work.
     # ------------------------------------------------------------------
 
-    @llm_tool(
-        name="mcbot_task",
+    @plugin_entry(
+        id="mcbot_task",
+        name="派发 Minecraft 游戏任务",
         description=MCBOT_TASK_DESCRIPTION,
-        parameters=MCBOT_TASK_SCHEMA,
-        # Held at the registry maximum even though the handler returns in
-        # milliseconds: the wrapper must never cap below a raised
-        # http_timeout, and keeping the ceiling removes that failure mode.
+        input_schema=MCBOT_TASK_SCHEMA,
+        metadata=CONTROL_ENTRY_METADATA,
+        llm_result_fields=["summary", "accepted", "task_id"],
         timeout=300.0,
     )
-    async def mcbot_task(self, *, text: Any = None, overwrite: Any = False, **_):
+    async def mcbot_task(self, *, text: Any = None, overwrite: Any = False, _ctx: Any = None, **_):
         # ``text`` is typed ``Any`` rather than ``str`` so a model that
         # violates the schema (omits it, sends null, sends a number) lands in
         # this body and gets a structured hint, instead of the SDK raising a
         # TypeError it would surface as a generic tool failure.
+        # The analyzer forwards the owner's original utterance separately from
+        # its generated arguments. Keep it intact when that context is present.
+        original = _ctx.get("latest_user_request") if isinstance(_ctx, dict) else None
+        if isinstance(original, str) and original.strip():
+            text = original
         if not isinstance(text, str) or not text.strip():
-            return prompts.t("TASK_SCHEMA_ERROR", lang=self._lang)
+            return Err(prompts.t("TASK_SCHEMA_ERROR", lang=self._lang))
         task_text = text.strip()
         if task_looks_like_identifier(task_text):
-            return prompts.t("TASK_IDENTIFIER_ERROR", lang=self._lang)
+            return Err(prompts.t("TASK_IDENTIFIER_ERROR", lang=self._lang))
 
         await self._ensure_service_started()
         # A reverse question still awaiting an answer is the one thing that
@@ -324,38 +321,26 @@ class McbotBridgePlugin(NekoPluginBase):
             if self._service.has_open_question()
             else ""
         )
-        claimed = await self._service.try_claim_pending(
-            task_text, overwrite=overwrite is True
+        result = await self._service.submit(
+            task_text, overwrite=overwrite is True, target_lanlan=_recipient(self), return_receipt=True,
         )
-        if claimed is None:
-            current = self._service.current_task_text() or prompts.t(
-                "LABEL_IDLE", lang=self._lang
-            )
-            return (
-                prompts.t("TASK_BUSY_HINT", lang=self._lang, current=current[:80])
-                + hint
-            )
-
-        envelope = await self._service.dispatch_claimed(claimed)
-        if envelope:
-            return envelope
-        return prompts.t("TASK_DISPATCHED_ACK", lang=self._lang) + hint
+        if result.get("is_error"):
+            return Err(result["output"]["error"] + hint)
+        result["summary"] += hint
+        return await self._control_result(result)
 
     @llm_tool(
         name="mcbot_ask",
         description=MCBOT_ASK_DESCRIPTION,
         parameters=MCBOT_ASK_SCHEMA,
-        # mcbot answers or gives up with a 504 at 135s; the client's own budget
-        # (ask_timeout_seconds) sits just above that. Keep the wrapper ceiling
-        # at the registry max so raising the configured budget cannot silently
-        # trip a wrapper timeout instead.
+        # Observation uses only GET status and cached receipts.
         timeout=300.0,
     )
     async def mcbot_ask(self, *, text: Any = None, **_):
         if not isinstance(text, str) or not text.strip():
             return prompts.t("ASK_SCHEMA_ERROR", lang=self._lang)
         await self._ensure_service_started()
-        return await self._service.ask(text.strip())
+        return await self._service.ask(text.strip(), target_lanlan=_recipient(self))
 
     @llm_tool(
         name="mcbot_answer",
@@ -370,7 +355,7 @@ class McbotBridgePlugin(NekoPluginBase):
             return prompts.t("ANSWER_SCHEMA_ERROR", lang=self._lang)
         await self._ensure_service_started()
         qid = question_id.strip() if isinstance(question_id, str) else ""
-        return await self._service.answer(qid, text.strip())
+        return await self._service.answer(qid, text.strip(), target_lanlan=_recipient(self))
 
     @llm_tool(
         name="mcbot_cancel",
@@ -390,12 +375,45 @@ class McbotBridgePlugin(NekoPluginBase):
         else:
             return prompts.t("CANCEL_ID_ERROR", lang=self._lang)
         await self._ensure_service_started()
-        return await self._service.cancel(tid)
+        return await self._service.cancel(tid, target_lanlan=_recipient(self))
 
 
     # ------------------------------------------------------------------
     # @plugin_entry — analyzer / panel / CLI surface
     # ------------------------------------------------------------------
+
+    @plugin_entry(
+        id="mcbot_answer",
+        name="回答 Minecraft 游戏中的待答问题",
+        description=(
+            "只在用户实际回答了游戏身体提出的有效问题时，按用户原话text回传答复。"
+            "用于路径或攻击授权、选择等反问，不能替用户同意，也不能将答复派成新任务。"
+            "question_id可省略，自动匹配当前角色唯一有效问题；多个问题时须明确编号或先询问。"
+            "提交答复不是任务完成，之后继续等待真实游戏事件。"
+        ),
+        input_schema=MCBOT_ANSWER_SCHEMA,
+        metadata=CONTROL_ENTRY_METADATA,
+        llm_result_fields=["summary"],
+        timeout=30.0,
+    )
+    async def mcbot_answer_entry(self, *, text: Any = None, question_id: Any = None, _ctx: Any = None, **_):
+        original = _ctx.get("latest_user_request") if isinstance(_ctx, dict) else None
+        if isinstance(original, str) and original.strip():
+            text = original
+        if (not isinstance(text, str) or not text.strip()
+                or question_id is not None and (not isinstance(question_id, str) or not question_id.strip())):
+            return Err(prompts.t("ANSWER_SCHEMA_ERROR", lang=self._lang))
+        result = await McbotBridgePlugin.mcbot_answer(self, text=text, question_id=question_id)
+        if isinstance(result, dict) and result.get("is_error"):
+            return Err(result["output"]["error"])
+        return await self._control_result({"summary": result, "answer_submitted": True, "goal_satisfied": False})
+
+    async def _control_result(self, data: Dict[str, Any]):
+        # A successful manager entry is not a completed Minecraft objective.
+        # Only the executor's done event owns the result announcement.
+        return await self.finish(
+            data=data, delivery="silent", meta={"agent": {"result_kind": "event"}},
+        )
 
     @ui.action(id="mcbot_status", label="刷新状态")
     @plugin_entry(
@@ -403,24 +421,21 @@ class McbotBridgePlugin(NekoPluginBase):
         name="查询 mcbot 同伴状态",
         description=(
             "查询 mcbot 同伴的状态：身体（同伴）是否在线、她当前在做什么、有没有待答复的问题。"
-            "面向插件面板与分析器；对话模型不通过它派活或答复。"
+            "这是管理查询，不执行采集、建造或其他游戏任务，也不证明游戏任务完成。"
+            "用户要求游戏行动时选择 mcbot_task 入口，不要用状态查询代替派发。"
         ),
+        metadata=CONTROL_ENTRY_METADATA,
         llm_result_fields=["summary"],
         input_schema={"type": "object", "properties": {}},
     )
     async def mcbot_status(self, **_):
         try:
             await self._ensure_service_started()
-            status = self._service.get_status()
+            live = await self._service.probe_status()
+            status = self._service.get_status(target_lanlan=_recipient(self))
             connected = bool(status.get("connected"))
-            if not connected:
-                # Only pay for a REST probe when the stream is silent — that
-                # is the one case where "stream down" might still mean "bridge
-                # up" (streaming disabled, or a stream that has not re-attached
-                # yet). The streaming case is authoritative and free.
-                live = await self._service.probe_status()
-                if live:
-                    connected = True
+            if live:
+                connected = True
             status["connected"] = connected
 
             label = prompts.t(
@@ -441,7 +456,7 @@ class McbotBridgePlugin(NekoPluginBase):
                 # live stream proves the token works, whatever the file says
                 # now (it may have been rotated out from under us).
                 status["summary"] += " " + prompts.t("NO_TOKEN_HINT", lang=self._lang)
-            return Ok(status)
+            return await self._control_result(status)
         except Exception as exc:
             return Err(f"{type(exc).__name__}: {exc}")
 
@@ -450,7 +465,7 @@ class McbotBridgePlugin(NekoPluginBase):
         # Required by the hosted panel's props.api.call: without a provider for
         # its context id, the host refuses every action call from the surface.
         try:
-            return {"status": self._service.get_status()}
+            return {"status": self._service.get_status(target_lanlan=_recipient(self))}
         except Exception:
             return {"status": {}}
 
@@ -458,15 +473,20 @@ class McbotBridgePlugin(NekoPluginBase):
     @plugin_entry(
         id="mcbot_stop",
         name="停止 mcbot 当前任务",
-        description="让同伴停下当前在做的全部任务。只在用户明确要求停止时使用。",
+        description="仅提交取消当前任务。只在用户明确要求停止时使用；不是采集或建造入口，取消受理不证明目标完成或身体停稳。",
+        metadata=CONTROL_ENTRY_METADATA,
         llm_result_fields=["summary"],
         input_schema={"type": "object", "properties": {}},
     )
     async def mcbot_stop(self, **_):
         try:
             await self._ensure_service_started()
-            summary = await self._service.cancel(None)
-            return Ok({"summary": summary, "result": self._service.get_status()})
+            summary = await self._service.cancel(None, target_lanlan=_recipient(self))
+            if isinstance(summary, dict) and summary.get("is_error"):
+                return Err(summary["output"]["error"])
+            return await self._control_result({
+                "summary": summary, "result": self._service.get_status(target_lanlan=_recipient(self)),
+            })
         except Exception as exc:
             return Err(f"{type(exc).__name__}: {exc}")
 
@@ -477,8 +497,10 @@ class McbotBridgePlugin(NekoPluginBase):
         description=(
             "重新读取 plugin.toml [mcbot] 配置并重读 token 文件。base_url、"
             "game_dir、token_file、重连间隔或事件流开关有改动时会重建连接；"
-            "纯超时类改动即时生效。"
+            "纯超时类改动即时生效。仅用于明确修改配置后的管理操作；"
+            "不派发或完成游戏任务，不能用于响应采集、挖矿、建造请求，也不是执行前必需步骤。"
         ),
+        metadata=CONTROL_ENTRY_METADATA,
         llm_result_fields=["summary"],
         input_schema={"type": "object", "properties": {}},
     )
@@ -490,11 +512,11 @@ class McbotBridgePlugin(NekoPluginBase):
             section = cfg.get("mcbot")
             self._cfg = section if isinstance(section, dict) else {}
             restarted = await self._service.reload_config_live(self._cfg)
-            return Ok({
+            return await self._control_result({
                 "summary": (
-                    "config reloaded with transport restart"
+                    "Bridge configuration reloaded; transport restarted. No game task was dispatched or verified complete."
                     if restarted
-                    else "config reloaded (live)"
+                    else "Bridge configuration reloaded. No game task was dispatched or verified complete."
                 ),
                 "transport_restarted": restarted,
                 "result": self._service.get_status(),
