@@ -6,6 +6,9 @@
 这是 `game_agent_minecraft`（接 mc-agent，裸 WebSocket 48909）的**同形兄弟**，
 但接的是另一条线、另一种传输。
 
+> 第一次使用先看 [使用指南](docs/guide.md)：安装、首次连接、叫停接续和排障。
+> 本 README 偏接口、设计与开发说明。
+
 ---
 
 ## 它连的是什么
@@ -187,6 +190,8 @@ mcbot 出于安全考虑只在**回环地址**上开桥，而且**只在 Minecra
 
 ## 启用步骤
 
+完整步骤、首次连接顺序和排障见 [使用指南](docs/guide.md)；这里是快速摘要：
+
 1. **N.E.K.O. 侧**：插件面板里启用 `mcbot_bridge`，必要时在设置里填 `game_dir`（或留空用默认）。
 2. **Minecraft 侧**：装好 mcbot，客户端进入一个世界——这时桥才会开始监听，`bridge.token` 才会存在。
 3. 在对话里让猫娘指挥同伴，例如「让同伴去挖点木头」。
@@ -202,6 +207,7 @@ mcbot 出于安全考虑只在**回环地址**上开桥，而且**只在 Minecra
 | `service.py` | **状态与语义**：任务占坑、SSE 事件路由、cue 发射、token 读取。不 import 插件 SDK，可独立测试 |
 | `client.py` | **纯传输**：`httpx.AsyncClient` 的五个 REST 方法 + 单连接 SSE 泵。不持有游戏状态，不 import SDK |
 | `prompts.py` | 全部 LLM 可见措辞，按 8 种语言键控 |
+| `docs/guide.md` | 用户教程：插件详情页「指南」标签（`plugin.toml` 的 `[[plugin.ui.guide]]`） |
 | `config.schema.json` | 设置表单契约（由 `plugin/tests/unit/plugins/test_bundled_config_schemas.py` 强制校验） |
 
 ### 两个不显然的设计点
@@ -237,7 +243,7 @@ import 命中已加载的模块，而不是把入口当顶层模块重跑一遍�
 **要在真实宿主里调试**，把插件复制进宿主源码树后 Reload 该插件：
 
 ```powershell
-$dst = "E:\NEKOdm\N.E.K.O\plugin\plugins\mcbot_bridge"
+$dst = "<N.E.K.O 源码目录>\plugin\plugins\mcbot_bridge"  # 换成本机路径，不要提交自己的路径
 New-Item -ItemType Directory -Force -Path $dst | Out-Null
 Copy-Item .\__init__.py,.\client.py,.\service.py,.\prompts.py,.\plugin.toml,`
   .\config.schema.json,.\README.md -Destination $dst -Force

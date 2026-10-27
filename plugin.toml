@@ -42,6 +42,14 @@ context = "mcbot"
 # action:call 让面板通过 props.api.call 调用 mcbot_status / mcbot_stop。
 permissions = ["state:read", "action:call"]
 
+# 教程页：插件详情页的「指南」标签，Markdown 给用户看。
+# 面板负责状态/停止，指南负责安装、首次连接、叫停接续和排障。
+[[plugin.ui.guide]]
+id = "guide"
+title = "使用指南"
+entry = "docs/guide.md"
+permissions = ["state:read"]
+
 [mcbot]
 # mcbot 的本地桥（仅在 Minecraft 客户端进入世界时监听）。
 base_url = "http://127.0.0.1:17897"
