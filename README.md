@@ -50,8 +50,13 @@ mcbot 出于安全考虑只在**回环地址**上开桥，而且**只在 Minecra
   不套"我这边做完了 / 我已经停下来了"的框架。
 - **建筑叫停后的接续命令**：`继续` / `继续建造` / `继续施工` 只有在 `mcbot` 保留了一份
   已叫停建筑资料时才是命令；没有这份资料时它们就是普通任务（例如"继续挖"）。连接器按
-  done 正文开头的 **"已接回原建筑图"** 标记识别成功接续（失败仍走失败模板），
+  done 正文开头的 **"已接回原建筑图与累计账"** 标记识别成功接续（失败仍走失败模板），
   即使这条命令是游戏内 `@bot` 发的、连接器没有派发记录，也能正确走命令回执。
+- **关键节点 `progress.milestone`**：mcbot 会在 `progress` 里附带可选的
+  `milestone{id,kind,verified,facts,evidence}`。连接器把它作为独立的 `respond` 通知，
+  按 `session_id + task_id + milestone.id` 去重；POST 返回 `task_id` 前的节点先暂存，
+  拿到编号后按到达顺序补送。节点只证明该阶段条件，不是 `done`，不释放任务槽、
+  不派发新任务，也不代表整项目标完成。
 - **`done` 的正文只有 cue 一条通道**（工具调用本身返回空壳），因此完成报告不再截到 600 字；
   只在超过 `DONE_TEXT_LIMIT`（4000）时截断并显式标注"后半段省略"。
 - 桥在**提交任务前**就先取了事件游标，所以一个极快的 `done` 可能在 `POST` 返回之前
@@ -85,6 +90,7 @@ mcbot 出于安全考虑只在**回环地址**上开桥，而且**只在 Minecra
 | `progress` 工具回执 `ok=true` | 纯叙事 | `blind` | `["hud"]` | 4 | `mcbot_progress` |
 | `progress` 工具回执 `ok=false` | 中途失败 | `read` | `[]` | 4 | `mcbot_progress` |
 | `progress` 护栏 / 长活中间帧 | 不给模型 | `blind` | `[]` | 4 | `mcbot_progress` |
+| `progress` 带 `milestone` | 关键节点 | `respond` | `[]` | 6 | `mcbot_milestone:<session>/<task>/<id>` |
 | `done` | 终局 | `respond` | `[]` | 7 | `mcbot_completion` |
 | `done`（命令类：恢复/状态/放弃目标，`completed` 只是受理） | 回执 | `respond` | `[]` | 7 | `mcbot_completion` |
 | `done`（建筑叫停接续：继续/继续建造/继续施工，靠 done 正文标记识别） | 回执 | `respond` | `[]` | 7 | `mcbot_completion` |

@@ -132,6 +132,17 @@ PROMPTS: Dict[str, Dict[str, str]] = {
         "es": "[Un paso no funcionó{identity}] {text}\nEs solo un paso intermedio, no el resultado final; puede que aún me recupere. No lo presentes como resultado; menciónalo solo si importa.",
         "pt": "[Um passo não deu certo{identity}] {text}\nIsto é só um passo intermediário, não o resultado final — posso ainda me recuperar. Não apresente como resultado; mencione só se importar.",
     },
+    # -- milestone: a verified key node, not the whole task --------------------
+    "CUE_MILESTONE": {
+        "zh": "[我这边完成了一个关键节点{identity}] {text}\n这是阶段成果，不是整项任务完成。用自己的话告诉 {{MASTER_NAME}}，然后继续原任务。\n{internal_gag}",
+        "zh-TW": "[我這邊完成了一個關鍵節點{identity}] {text}\n這是階段成果，不是整項任務完成。用自己的話告訴 {{MASTER_NAME}}，然後繼續原任務。\n{internal_gag}",
+        "en": "[I reached a key milestone{identity}] {text}\nThis is a stage result, not the whole task. Tell {{MASTER_NAME}} in your own words, then continue the task.\n{internal_gag}",
+        "ja": "[重要な節目を達成した{identity}] {text}\nこれは段階的な成果で、タスク全体の完了ではない。{{MASTER_NAME}} に自分の言葉で伝えて、そのまま元のタスクを続けて。\n{internal_gag}",
+        "ko": "[중요한 단계를 달성했어{identity}] {text}\n이건 단계적 성과야, 전체 작업 완료가 아니야. {{MASTER_NAME}} 에게 네 말로 전하고 원래 작업을 계속해.\n{internal_gag}",
+        "ru": "[Я достигла важного этапа{identity}] {text}\nЭто промежуточный результат, а не завершение всей задачи. Расскажи {{MASTER_NAME}} своими словами и продолжай исходную задачу.\n{internal_gag}",
+        "es": "[Alcancé un hito importante{identity}] {text}\nEs un resultado de etapa, no la tarea completa. Cuéntaselo a {{MASTER_NAME}} con tus palabras y continúa la tarea original.\n{internal_gag}",
+        "pt": "[Alcancei um marco importante{identity}] {text}\nÉ um resultado de etapa, não a tarefa inteira. Conte a {{MASTER_NAME}} com suas palavras e continue a tarefa original.\n{internal_gag}",
+    },
     # -- done: the task ended successfully -------------------------------------
     "CUE_DONE": {
         "zh": "[我这边做完了{identity}] {text}\n我已经停下来了。把结果用自己的话讲给 {{MASTER_NAME}} 听，别把原话照念。\n{internal_gag}",

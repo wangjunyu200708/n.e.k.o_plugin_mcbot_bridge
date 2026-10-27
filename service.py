@@ -102,6 +102,7 @@ _CURSOR_SAVE_INTERVAL_S = 5.0
 #   alert 9 > question 8 > completion 7 > progress/state 4
 PRIORITY_STATE = 4
 PRIORITY_PROGRESS = 4
+PRIORITY_MILESTONE = 6
 PRIORITY_COMPLETION = 7
 PRIORITY_QUESTION = 8
 
@@ -228,12 +229,11 @@ class PendingTask:
         self.watchdog: Optional[asyncio.Task[None]] = None
         # True between claiming the slot and learning the task id from the
         # POST response. The bridge takes its event cursor *before* submitting,
-        # so a fast ``done`` can land on the stream while the HTTP call is
-        # still in flight — those frames are parked here and replayed once the
-        # id is known, instead of being matched against a task we cannot yet
-        # identify.
+        # so a fast ``done`` or a key-node ``progress`` can land on the stream
+        # while the HTTP call is still in flight — those frames are parked here
+        # (tagged, in arrival order) and replayed once the id is known.
         self.awaiting_id = True
-        self.buffered: list[Dict[str, Any]] = []
+        self.buffered: list[tuple[str, Dict[str, Any]]] = []
 
 
 class McbotService:
@@ -303,6 +303,11 @@ class McbotService:
         self._seen_frames_order: deque[tuple] = deque()
         self._finished_tasks: set[str] = set()
         self._finished_order: deque[str] = deque()
+        # Key-node notifications are deduplicated by (session, task, node id),
+        # independently of the SSE cursor: a reconnect can replay the same node
+        # under a new frame id, and the model must not hear it twice.
+        self._seen_milestones: set[tuple] = set()
+        self._seen_milestone_order: deque[tuple] = deque()
         # task_id -> the directive we dispatched, so a `done` can be framed by
         # what was asked. Only the command directives below need it; ordinary
         # work never consults this map.
@@ -829,8 +834,11 @@ class McbotService:
         # attributed. Replay before checking the window result below.
         pending.awaiting_id = False
         buffered, pending.buffered = pending.buffered, []
-        for parked in buffered:
-            await self._apply_done(parked)
+        for kind, parked in buffered:
+            if kind == "milestone":
+                self._on_milestone(parked)
+            else:
+                await self._apply_done(parked)
         self._log_info("task dispatched (id={})", pending.task_id)
 
         # `done: true` means the task finished inside the response window; with
@@ -918,6 +926,12 @@ class McbotService:
 
 
     async def _on_progress(self, payload: Dict[str, Any]) -> None:
+        # Key nodes are a separate, reliable notification: a progress frame may
+        # carry an optional `milestone` object that must not be drowned out by
+        # ordinary narration. Park it before the POST returns; otherwise emit
+        # one respond cue, deduplicated by session/task/node id.
+        if isinstance(payload.get("milestone"), dict) and self._on_milestone(payload):
+            return
         text = _as_str(payload.get("text")).strip()
         if not text:
             return
@@ -955,9 +969,61 @@ class McbotService:
             # done can beat the POST response, and until we know our task id we
             # cannot tell it apart from another task's.
             if len(pending.buffered) < _MAX_BUFFERED_EVENTS:
-                pending.buffered.append(payload)
+                pending.buffered.append(("done", payload))
             return
         await self._apply_done(payload)
+
+    def _on_milestone(self, payload: Dict[str, Any]) -> bool:
+        """Deliver one verified key node, or park it until the task id is known.
+
+        Returns True when the payload was consumed (delivered or parked), so
+        the ordinary progress path does not also narrate it. A malformed or
+        unverified milestone returns False and stays ordinary progress.
+        """
+        milestone = payload.get("milestone")
+        if not isinstance(milestone, dict):
+            return False
+        milestone_id = _as_str(milestone.get("id")).strip()
+        if not milestone_id or len(milestone_id) > 128:
+            return False
+        if milestone.get("verified") is not True:
+            return False
+        task_id = payload.get("task_id")
+        if not isinstance(task_id, int) or isinstance(task_id, bool) or task_id <= 0:
+            return False
+        key = (self._session_id, task_id, milestone_id)
+        if key in self._seen_milestones:
+            return True
+        pending = self._pending
+        if pending is not None and pending.awaiting_id:
+            if len(pending.buffered) < _MAX_BUFFERED_EVENTS:
+                pending.buffered.append(("milestone", payload))
+            else:
+                self._log_warning(
+                    "milestone buffer full; dropping task={} id={}",
+                    task_id, milestone_id,
+                )
+            return True
+        text = _as_str(milestone.get("facts")).strip() or _as_str(payload.get("text")).strip()
+        if not text:
+            return False
+        self._remember_milestone(key)
+        self._push_cue(
+            "CUE_MILESTONE",
+            ai_behavior="respond",
+            priority=PRIORITY_MILESTONE,
+            coalesce_key=self._event_key("milestone", f"{task_id}/{milestone_id}"),
+            text=text[:DONE_TEXT_LIMIT],
+        )
+        return True
+
+    def _remember_milestone(self, key: tuple) -> None:
+        if key in self._seen_milestones:
+            return
+        if len(self._seen_milestone_order) >= _SEEN_FRAME_LIMIT:
+            self._seen_milestones.discard(self._seen_milestone_order.popleft())
+        self._seen_milestone_order.append(key)
+        self._seen_milestones.add(key)
 
     def _remember_directive(self, task_id: int, text: str) -> None:
         """Remember what we asked for, so a done can be framed by it.

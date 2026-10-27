@@ -191,6 +191,22 @@ def _fresh(event: str, **payload) -> SseFrame:
     return SseFrame(event=event, data=json.dumps(payload), id=str(next(_FRAME_SEQ)))
 
 
+def _milestone(task_id: int = 21, milestone_id: str = "a" * 64,
+               facts: str = "Collected 32/64 logs.", *, verified: bool = True) -> dict:
+    """A minimal mcbot ``progress.milestone`` payload."""
+    return {
+        "task_id": task_id,
+        "text": facts,
+        "milestone": {
+            "id": milestone_id,
+            "kind": "item",
+            "verified": verified,
+            "facts": facts,
+            "evidence": {"item": "minecraft:oak_log", "count": 32},
+        },
+    }
+
+
 # ---------------------------------------------------------------------------
 # configure() / helpers
 # ---------------------------------------------------------------------------
@@ -395,6 +411,92 @@ async def test_successful_tool_step_is_blind_and_panel_only():
     assert len(pushes) == 1
     assert pushes[0]["ai_behavior"] == "blind"
     assert pushes[0]["visibility"] == ["hud"]
+
+
+async def test_a_verified_milestone_is_a_respond_cue_and_not_a_done():
+    service, pushes = _make_service()
+    service.set_lang("en")
+    claimed = await service.try_claim_pending("gather 64 logs")
+    assert claimed is not None
+    claimed.awaiting_id = False
+
+    await service.handle_event(_fresh("progress", **_milestone(task_id=21)))
+
+    milestones = [c for c in pushes if c["coalesce_key"].startswith("mcbot_milestone:")]
+    assert len(milestones) == 1
+    cue = milestones[0]
+    assert cue["ai_behavior"] == "respond"
+    assert cue["priority"] == 6
+    text = cue["parts"][0]["text"]
+    assert "key milestone" in text
+    assert "not the whole task" in text
+    assert "Collected 32/64 logs." in text
+    # A stage node never releases the task slot or resolves the waiter.
+    assert service.has_pending_task()
+    assert not claimed.event.is_set()
+    await service.stop()
+
+
+async def test_milestone_is_deduped_by_session_task_and_node_id():
+    service, pushes = _make_service()
+    service.set_lang("en")
+    service._session_id = "sess"
+    payload = _milestone(task_id=22)
+
+    await service.handle_event(_fresh("progress", **payload))
+    await service.handle_event(_fresh("progress", **payload))
+
+    milestones = [c for c in pushes if c["coalesce_key"].startswith("mcbot_milestone:")]
+    assert len(milestones) == 1
+    await service.stop()
+
+
+async def test_milestone_before_the_post_returns_is_parked_then_replayed_in_order():
+    service, pushes = _make_service()
+    service.set_lang("en")
+    client = _FakeClient(task_id=77)
+    service._client = client
+    claimed = await service.try_claim_pending("gather 64 logs")
+    assert claimed is not None
+    assert claimed.awaiting_id is True
+
+    await service.handle_event(_fresh("progress", **_milestone(task_id=77)))
+    await service.handle_event(_fresh("done", task_id=77, text="Done.", status="completed"))
+    assert [kind for kind, _ in claimed.buffered] == ["milestone", "done"]
+
+    await service.dispatch_claimed(claimed)
+
+    cues = [c for c in pushes if c["coalesce_key"].startswith(("mcbot_milestone:", "mcbot_done:"))]
+    assert [c["coalesce_key"].split(":")[0] for c in cues] == ["mcbot_milestone", "mcbot_done"]
+    await service.stop()
+
+
+async def test_unverified_or_unassociated_milestones_fall_back_to_ordinary_progress():
+    service, pushes = _make_service()
+    service.set_lang("en")
+
+    await service.handle_event(_fresh("progress", **_milestone(verified=False)))
+    await service.handle_event(_fresh("progress", **_milestone(task_id=0)))
+
+    assert [c for c in pushes if c["coalesce_key"].startswith("mcbot_milestone:")] == []
+    await service.stop()
+
+
+async def test_another_tasks_milestone_is_narrated_without_releasing_our_slot():
+    service, pushes = _make_service()
+    service.set_lang("en")
+    claimed = await service.try_claim_pending("mine")
+    assert claimed is not None
+    claimed.task_id = 5
+    claimed.awaiting_id = False
+
+    await service.handle_event(_fresh("progress", **_milestone(task_id=99)))
+
+    milestones = [c for c in pushes if c["coalesce_key"].startswith("mcbot_milestone:")]
+    assert len(milestones) == 1
+    assert service.has_pending_task()
+    assert not claimed.event.is_set()
+    await service.stop()
 
 
 async def test_guardrail_and_job_progress_are_blind():
