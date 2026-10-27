@@ -59,6 +59,13 @@ TASK_STATUSES_SILENT = ("cancelled", "superseded")
 # Narrating any of them as "I finished" tells the owner a goal is satisfied.
 COMMAND_DIRECTIVES = ("恢复目标", "目标状态", "放弃目标")
 
+# These three are commands only while a stopped construction is retained; with
+# no retained construction they are ordinary directives ("继续" can mean "keep
+# digging"). The resumed-command done text starts with the marker below, which
+# lets us tell the two cases apart without guessing from the directive alone.
+CONTINUATION_DIRECTIVES = ("继续", "继续建造", "继续施工")
+CONSTRUCTION_RESUME_MARKER = "已接回原建筑图与累计账"
+
 # Safety cap on a done report before it reaches the model. The cue is the only
 # channel for the outcome — the tool call itself returns an empty envelope — so
 # this sits far above a normal report and only guards against a runaway one.
@@ -965,12 +972,24 @@ class McbotService:
         while len(self._task_directive_order) > _SEEN_FRAME_LIMIT:
             self._task_directives.pop(self._task_directive_order.popleft(), None)
 
-    def _command_by_task(self, task_id: Any) -> str:
-        """The command word when this task was one of the command directives."""
-        if not isinstance(task_id, int) or isinstance(task_id, bool):
-            return ""
-        directive = self._task_directives.get(task_id, "").strip()
-        return directive if directive in COMMAND_DIRECTIVES else ""
+    def _command_by_task(self, task_id: Any, text: str = "") -> str:
+        """The command word when this task was a command rather than work.
+
+        The three L2 directives are commands by their own spelling. The
+        construction-resume words are context-dependent, so they only count
+        when the done text carries the resume marker; a plain "继续" task keeps
+        the ordinary finished frame. The marker also covers an in-game
+        ``@bot 继续`` that this plugin did not dispatch (and therefore has no
+        directive for).
+        """
+        directive = ""
+        if isinstance(task_id, int) and not isinstance(task_id, bool):
+            directive = self._task_directives.get(task_id, "").strip()
+        if directive in COMMAND_DIRECTIVES:
+            return directive
+        if text.startswith(CONSTRUCTION_RESUME_MARKER):
+            return directive if directive in CONTINUATION_DIRECTIVES else "继续"
+        return ""
 
     def _clip_done_text(self, text: str) -> str:
         """Bound a done report, saying so when the tail is dropped."""
@@ -1023,8 +1042,9 @@ class McbotService:
             return
         # A command directive reports `completed` when it is merely *accepted*
         # (`BRIDGE.md`): 恢复目标 then runs under a new task id, and 目标状态
-        # does no work. "I finished" would be a lie in both cases.
-        command = self._command_by_task(task_id) if status == TASK_STATUS_COMPLETED else ""
+        # does no work. Construction resume words are commands only when the
+        # done text carries the resume marker; the helper decides that.
+        command = self._command_by_task(task_id, text) if status == TASK_STATUS_COMPLETED else ""
         key = (
             "CUE_COMMAND_RECEIPT"
             if command

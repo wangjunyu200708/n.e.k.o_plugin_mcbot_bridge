@@ -452,6 +452,90 @@ async def test_a_command_directive_is_narrated_as_a_receipt_not_as_finished(dire
     assert "I've stopped" not in text
 
 
+@pytest.mark.parametrize("directive", ["继续", "继续建造", "继续施工"])
+async def test_a_construction_resume_command_is_narrated_as_a_receipt(directive):
+    """A stopped building resumes under a new task id; the command only accepted it."""
+    service, pushes = _make_service()
+    service.set_lang("en")
+    service._client = _FakeClient(task_id=14)
+    claimed = await service.try_claim_pending(directive)
+    assert claimed is not None
+    await service.dispatch_claimed(claimed)
+
+    await service.handle_event(
+        _frame(
+            "done",
+            task_id=14,
+            text="已接回原建筑图与累计账，正在核对当前工地及新权限；旧路径、程序和批准不回放。",
+            status="completed",
+        )
+    )
+    cues = [c for c in pushes if c["coalesce_key"].startswith("mcbot_done:")]
+    assert len(cues) == 1
+    text = cues[0]["parts"][0]["text"]
+    assert "Command receipt" in text
+    assert directive in text
+    assert "I finished" not in text
+    assert "I've stopped" not in text
+
+
+async def test_a_plain_continue_task_keeps_the_finished_frame():
+    """Without a stopped building, "继续" is ordinary work, not a command."""
+    service, pushes = _make_service()
+    service.set_lang("en")
+    service._client = _FakeClient(task_id=15)
+    claimed = await service.try_claim_pending("继续")
+    assert claimed is not None
+    await service.dispatch_claimed(claimed)
+
+    await service.handle_event(
+        _frame("done", task_id=15, text="继续挖了三格圆石。", status="completed")
+    )
+    text = [c for c in pushes if c["coalesce_key"].startswith("mcbot_done:")][0]["parts"][0]["text"]
+    assert "I finished" in text
+    assert "Command receipt" not in text
+
+
+async def test_an_in_game_construction_resume_is_still_a_receipt():
+    """The marker identifies the command even when this plugin did not dispatch it."""
+    service, pushes = _make_service()
+    service.set_lang("en")
+    await service.handle_event(
+        _frame(
+            "done",
+            task_id=77,
+            text="已接回原建筑图与累计账，正在核对当前工地及新权限；旧路径、程序和批准不回放。",
+            status="completed",
+        )
+    )
+    cues = [c for c in pushes if c["coalesce_key"].startswith("mcbot_done:")]
+    assert len(cues) == 1
+    text = cues[0]["parts"][0]["text"]
+    assert "Command receipt" in text
+    assert "继续" in text
+    assert "I finished" not in text
+
+
+async def test_a_failed_construction_resume_keeps_the_failure_frame():
+    service, pushes = _make_service()
+    service.set_lang("en")
+    service._client = _FakeClient(task_id=16)
+    claimed = await service.try_claim_pending("继续")
+    await service.dispatch_claimed(claimed)
+
+    await service.handle_event(
+        _frame(
+            "done",
+            task_id=16,
+            text="RECOVERY_UNAVAILABLE:当前建筑尚未停稳或没有可接续记录。",
+            status="failed",
+        )
+    )
+    cues = [c for c in pushes if c["coalesce_key"].startswith("mcbot_done:")]
+    assert len(cues) == 1
+    assert "didn't pull it off" in cues[0]["parts"][0]["text"]
+
+
 async def test_a_failed_command_keeps_the_failure_frame():
     service, pushes = _make_service()
     service.set_lang("en")

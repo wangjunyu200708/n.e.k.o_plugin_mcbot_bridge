@@ -143,9 +143,10 @@ PROMPTS: Dict[str, Dict[str, str]] = {
         "es": "[Terminé{identity}] {text}\nYa me detuve. Cuéntale a {{MASTER_NAME}} cómo fue con tus palabras; no leas esto literalmente.\n{internal_gag}",
         "pt": "[Terminei{identity}] {text}\nJá parei. Conte a {{MASTER_NAME}} como foi, com suas palavras; não leia isso ao pé da letra.\n{internal_gag}",
     },
-    # -- command receipt: mcbot answers 恢复目标/目标状态/放弃目标 as commands --
-    # Its AgentRunner reports COMPLETED for all three, but BRIDGE.md is explicit
-    # that a command's completed only means "accepted". Framing any of them as
+    # -- command receipt: mcbot answers 恢复目标/目标状态/放弃目标 and a stopped
+    # building's 继续/继续建造/继续施工 as commands --
+    # Its AgentRunner reports COMPLETED for these commands, but BRIDGE.md is
+    # explicit that a command's completed only means "accepted". Framing one as
     # "I finished" tells the owner a goal is satisfied when it is not.
     "CUE_COMMAND_RECEIPT": {
         "zh": "[命令回执{identity}] {text}\n这不是任务完成，只是命令「{command}」的受理或查询回执。按回执的原意用自己的话告诉 {{MASTER_NAME}}，别说成「做好了」，也别说成「我停下来了」。\n{internal_gag}",
